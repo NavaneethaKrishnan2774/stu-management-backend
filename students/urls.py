@@ -21,6 +21,7 @@ urlpatterns = [
     path('feedback-forms/', views.get_feedback_forms),
     path('create-feedback-form/', views.create_feedback_form),
     path('delete-feedback-form/<int:form_id>/', views.delete_feedback_form),
+    path('delete-feedback-summary/<int:form_id>/', views.delete_feedback_summary),
     path('submit-feedback/', views.submit_feedback),
     path('feedback-results/', views.get_feedback_results),
     path('submit-complaint/', views.submit_complaint),

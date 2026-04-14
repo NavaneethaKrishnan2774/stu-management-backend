@@ -610,3 +610,22 @@ def get_feedback_results(request):
         })
 
     return Response(data)
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_feedback_summary(request, form_id):
+    try:
+        form = FeedbackForm.objects.get(id=form_id)
+    except FeedbackForm.DoesNotExist:
+        return Response({"error": "Form not found"}, status=404)
+
+    # Only staff/admin or creator can delete
+    if not is_staff_user(request.user) and form.created_by != request.user:
+        return Response({"error": "Permission denied"}, status=403)
+
+    # Delete all responses linked to this form
+    deleted_count, _ = FeedbackResponse.objects.filter(form=form).delete()
+
+    return Response({
+        "message": f"{deleted_count} feedback responses deleted successfully"
+    })
