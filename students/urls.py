@@ -22,6 +22,7 @@ urlpatterns = [
     path('create-feedback-form/', views.create_feedback_form),
     path('delete-feedback-form/<int:form_id>/', views.delete_feedback_form),
     path('submit-feedback/', views.submit_feedback),
+    path('feedback-results/', views.get_feedback_results),
     path('submit-complaint/', views.submit_complaint),
     path('available-faculties/', views.get_available_faculties),
     path('attendance-percentage/', views.get_attendance_percentage),

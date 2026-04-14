@@ -580,3 +580,33 @@ def get_available_faculties(request):
             "role": faculty.role,
         })
     return Response(data)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_feedback_results(request):
+    # Only staff/admin can view results
+    if not is_staff_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    forms = FeedbackForm.objects.all()
+
+    data = []
+    for form in forms:
+        responses = FeedbackResponse.objects.filter(form=form)
+
+        data.append({
+            "form_id": form.id,
+            "title": form.title,
+            "subject": form.subject,
+            "faculty": form.faculty.get_full_name() if form.faculty else None,
+            "total_responses": responses.count(),
+            "responses": [
+                {
+                    "student": r.student.username,
+                    "response": r.response_text,
+                }
+                for r in responses
+            ]
+        })
+
+    return Response(data)
