@@ -81,6 +81,20 @@ class Timetable(models.Model):
     approved_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='approved_timetables')
     approved_at = models.DateTimeField(null=True, blank=True)
     is_approved = models.BooleanField(default=False)
+    approval_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('draft', 'Draft'),
+            ('submitted', 'Submitted'),
+            ('under_review', 'Under Review'),
+            ('approved', 'Approved'),
+            ('rejected', 'Rejected'),
+            ('rework_assigned', 'Rework Assigned'),
+            ('pending', 'Pending'),
+        ],
+        default='draft'
+    )
+    hod_comment = models.TextField(blank=True, null=True)
 
     day = models.CharField(max_length=10, choices=DAY_CHOICES)
     time = models.CharField(max_length=20, choices=TIME_CHOICES)

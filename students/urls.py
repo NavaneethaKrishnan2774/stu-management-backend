@@ -7,6 +7,8 @@ urlpatterns = [
     path('timetable/', views.get_timetable),
     path('timetables/', views.get_timetable),
     path('create-timetable/', views.create_timetable),
+    path('update-timetable/<int:id>/', views.update_timetable),
+    path('submit-timetable/<int:id>/', views.submit_timetable),
     path('delete-timetable/<int:id>/', views.delete_timetable),
     path('assignments/', views.get_assignments),
     path('submit/', views.submit_assignment),

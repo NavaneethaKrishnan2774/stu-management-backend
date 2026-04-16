@@ -29,21 +29,25 @@ def get_attendance(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_timetable(request):
-    if getattr(request.user, 'role', None) == 'student':
-        entries = Timetable.objects.filter(is_approved=True)
-    elif _is_faculty_fa_user(request.user):
-        assignment = _get_faculty_fa_assignment(request.user)
-        if assignment:
-            department, year, section = assignment
-            entries = Timetable.objects.filter(
-                department=department,
-                year__in=[year, 'all'],
-                section__in=[section, 'all']
-            )
-        else:
-            entries = Timetable.objects.none()
+    role = getattr(request.user, 'role', None)
+    if role == 'student':
+        entries = Timetable.objects.filter(approval_status='approved')
+    elif _is_hod_user(request.user):
+        department = request.user.department
+        entries = Timetable.objects.filter(department=department).exclude(approval_status='draft')
     else:
-        entries = Timetable.objects.all()
+        entries = Timetable.objects.filter(created_by=request.user)
+        if _is_faculty_fa_user(request.user):
+            assignment = _get_faculty_fa_assignment(request.user)
+            if assignment:
+                department, year, section = assignment
+                entries = entries | Timetable.objects.filter(
+                    department=department,
+                    year=year,
+                    section=section
+                )
+
+    entries = entries.distinct()
 
     data = []
     for item in entries:
@@ -61,6 +65,8 @@ def get_timetable(request):
             "approved_by": item.approved_by.username if item.approved_by else None,
             "approved_at": item.approved_at,
             "is_approved": item.is_approved,
+            "approval_status": item.approval_status,
+            "hod_comment": item.hod_comment,
             "day": item.day,
             "time": item.time,
             "period": item.period,
@@ -378,6 +384,7 @@ def create_timetable(request):
         faculty_user=faculty,
         created_by=request.user,
         is_approved=getattr(request.user, 'role', None) in ['hod', 'admin'],
+        approval_status='approved' if getattr(request.user, 'role', None) in ['hod', 'admin'] else 'draft',
         approved_by=request.user if getattr(request.user, 'role', None) in ['hod', 'admin'] else None,
         approved_at=now() if getattr(request.user, 'role', None) in ['hod', 'admin'] else None,
         day=day,
@@ -409,6 +416,9 @@ def delete_timetable(request, id):
             timetable.section == assignment[2]
         ):
             return Response({"error": "Permission denied: cannot delete timetable for other class"}, status=403)
+
+    if timetable.approval_status == 'approved':
+        return Response({"error": "Cannot delete approved timetable entry"}, status=403)
 
     timetable.delete()
     return Response({"message": "Deleted"})
@@ -627,7 +637,7 @@ def hod_timetables(request):
         return Response({"error": "Permission denied"}, status=403)
 
     department = request.user.department
-    entries = Timetable.objects.filter(department=department)
+    entries = Timetable.objects.filter(department=department).exclude(approval_status='draft')
     data = []
     for item in entries:
         data.append({
@@ -636,6 +646,7 @@ def hod_timetables(request):
             "year": item.year,
             "section": item.section,
             "semester": item.semester,
+            "subject_code": item.subject_code,
             "subject": item.subject,
             "faculty": item.faculty,
             "faculty_id": item.faculty_user.id if item.faculty_user else None,
@@ -643,6 +654,8 @@ def hod_timetables(request):
             "approved_by": item.approved_by.username if item.approved_by else None,
             "approved_at": item.approved_at,
             "is_approved": item.is_approved,
+            "approval_status": item.approval_status,
+            "hod_comment": item.hod_comment,
             "day": item.day,
             "time": item.time,
             "period": item.period,
@@ -674,10 +687,102 @@ def hod_approve_timetable(request, id):
         return Response({"error": "Not found"}, status=404)
 
     item.is_approved = True
+    item.approval_status = 'approved'
     item.approved_by = request.user
     item.approved_at = now()
     item.save()
     return Response({"message": "Timetable approved"})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def submit_timetable(request, id):
+    if not is_staff_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    try:
+        item = Timetable.objects.get(id=id)
+    except Timetable.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    permission_denied = _staff_timetable_edit_permission(request, item)
+    if permission_denied:
+        return permission_denied
+
+    if item.approval_status not in ['draft', 'pending', 'rejected', 'rework_assigned']:
+        return Response({"error": "Only draft, pending, rejected or rework-assigned timetables can be submitted"}, status=400)
+
+    item.approval_status = 'submitted'
+    item.is_approved = False
+    item.approved_by = None
+    item.approved_at = None
+    item.save()
+    return Response({"message": "Timetable submitted for HOD review"})
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def update_timetable(request, id):
+    if not is_staff_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    try:
+        item = Timetable.objects.get(id=id)
+    except Timetable.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    permission_denied = _staff_timetable_edit_permission(request, item)
+    if permission_denied:
+        return permission_denied
+
+    department = request.data.get("department", item.department)
+    year = request.data.get("year", item.year)
+    section = request.data.get("section", item.section)
+
+    if _is_faculty_fa_user(request.user):
+        permission_denied = _faculty_fa_class_permission(request, department, year, section, allow_all=False)
+        if permission_denied:
+            return permission_denied
+
+    item.department = department
+    item.year = year
+    item.section = section
+    item.subject_code = request.data.get("subject_code", item.subject_code)
+    item.subject = request.data.get("subject", request.data.get("subject_name", item.subject))
+    item.day = request.data.get("day", item.day)
+    item.time = request.data.get("time", item.time)
+    item.period = request.data.get("period", item.period)
+    item.semester = request.data.get("semester", item.semester)
+    item.credits = request.data.get("credits", item.credits)
+
+    faculty_id = request.data.get("faculty_id")
+    if faculty_id:
+        try:
+            faculty = User.objects.get(id=faculty_id, role='staff')
+            item.faculty_user = faculty
+            item.faculty = faculty.get_full_name() or faculty.username
+        except User.DoesNotExist:
+            return Response({"error": "Invalid faculty"}, status=400)
+    elif request.data.get("faculty"):
+        item.faculty = request.data.get("faculty")
+
+    submit_request = str(request.data.get("submit", "false")).lower() in ["true", "1", "yes"]
+    approval_status = request.data.get("approval_status")
+    if approval_status is not None:
+        approval_status = str(approval_status).lower()
+        if approval_status not in ['draft', 'submitted', 'pending', 'rejected', 'rework_assigned', 'under_review']:
+            return Response({"error": "Invalid approval status"}, status=400)
+        item.approval_status = approval_status
+    elif submit_request:
+        item.approval_status = 'submitted'
+
+    if item.approval_status == 'submitted':
+        item.is_approved = False
+        item.approved_by = None
+        item.approved_at = None
+
+    item.save()
+    return Response({"message": "Timetable updated"})
 
 
 @api_view(['PUT', 'PATCH'])
@@ -691,12 +796,60 @@ def hod_update_timetable(request, id):
     except Timetable.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
-    item.subject = request.data.get("subject", item.subject)
+    if item.approval_status == 'approved':
+        return Response({"error": "Cannot edit approved timetable entry"}, status=403)
+
+    department = request.data.get("department", item.department)
+    year = request.data.get("year", item.year)
+    section = request.data.get("section", item.section)
+
+    if _is_faculty_fa_user(request.user):
+        permission_denied = _faculty_fa_class_permission(request, department, year, section, allow_all=False)
+        if permission_denied:
+            return permission_denied
+
+    item.department = department
+    item.year = year
+    item.section = section
+    item.subject_code = request.data.get("subject_code", item.subject_code)
+    item.subject = request.data.get("subject", request.data.get("subject_name", item.subject))
     item.day = request.data.get("day", item.day)
     item.time = request.data.get("time", item.time)
     item.period = request.data.get("period", item.period)
-    if request.data.get("is_approved") is not None:
-        item.is_approved = request.data.get("is_approved") in [True, "true", "True", 1, "1"]
+    item.semester = request.data.get("semester", item.semester)
+
+    faculty_id = request.data.get("faculty_id")
+    if faculty_id:
+        try:
+            faculty = User.objects.get(id=faculty_id, role='staff')
+            item.faculty_user = faculty
+            item.faculty = faculty.get_full_name() or faculty.username
+        except User.DoesNotExist:
+            return Response({"error": "Invalid faculty"}, status=400)
+    elif request.data.get("faculty"):
+        item.faculty = request.data.get("faculty")
+
+    approval_status = request.data.get("approval_status")
+    if approval_status is not None:
+        approval_status = str(approval_status).lower()
+        if approval_status not in ['pending', 'under_review', 'approved', 'rejected', 'rework_assigned']:
+            return Response({"error": "Invalid approval status"}, status=400)
+        item.approval_status = approval_status
+        if approval_status == 'approved':
+            item.is_approved = True
+            item.approved_by = request.user
+            item.approved_at = now()
+        else:
+            item.is_approved = False
+            item.approved_by = None
+            item.approved_at = None
+    elif item.approval_status in ['submitted', 'pending', 'rework_assigned']:
+        item.approval_status = 'under_review'
+        item.is_approved = False
+        item.approved_by = None
+        item.approved_at = None
+
+    item.hod_comment = request.data.get("hod_comment", item.hod_comment)
     item.save()
     return Response({"message": "Timetable updated"})
 
@@ -865,6 +1018,21 @@ def _faculty_fa_class_permission(request, department, year, section, allow_all=F
     if not _matches_faculty_fa_class(assignment, department, year, section, allow_all=allow_all):
         return Response({"error": "Permission denied: FA can only access assigned class"}, status=403)
     return None
+
+
+def _staff_timetable_edit_permission(request, timetable):
+    if timetable.approval_status == 'approved':
+        return Response({"error": "Cannot edit approved timetable entry"}, status=403)
+
+    if timetable.created_by == request.user:
+        return None
+
+    if _is_faculty_fa_user(request.user):
+        assignment = _get_faculty_fa_assignment(request.user)
+        if assignment and timetable.department == assignment[0] and timetable.year == assignment[1] and timetable.section == assignment[2]:
+            return None
+
+    return Response({"error": "Permission denied"}, status=403)
 
 
 def _hod_permissions(request):
