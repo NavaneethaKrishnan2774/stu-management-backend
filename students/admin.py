@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Timetable, Attendance,Assignment,Submission
+from .models import Timetable, Attendance, StaffAttendance, Assignment, Submission
 
 @admin.register(Timetable)
 class TimetableAdmin(admin.ModelAdmin):
@@ -8,5 +8,6 @@ class TimetableAdmin(admin.ModelAdmin):
 
 
 admin.site.register(Attendance)
+admin.site.register(StaffAttendance)
 admin.site.register(Assignment)
 admin.site.register(Submission)

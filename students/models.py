@@ -76,6 +76,11 @@ class Timetable(models.Model):
 
     subject = models.CharField(max_length=100)
     faculty = models.CharField(max_length=100)
+    faculty_user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='timetable_entries')
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='created_timetables')
+    approved_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='approved_timetables')
+    approved_at = models.DateTimeField(null=True, blank=True)
+    is_approved = models.BooleanField(default=False)
 
     day = models.CharField(max_length=10, choices=DAY_CHOICES)
     time = models.CharField(max_length=20, choices=TIME_CHOICES)
@@ -94,6 +99,15 @@ class Attendance(models.Model):
     subject = models.CharField(max_length=100)
     date = models.DateField()
     status = models.CharField(max_length=10, choices=STATUS_CHOICES)
+
+
+class StaffAttendance(models.Model):
+    staff = models.ForeignKey(User, on_delete=models.CASCADE)
+    date = models.DateField()
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES)
+
+    def __str__(self):
+        return f"{self.staff.username} - {self.date} - {self.status}"
 
 
 class Assignment(models.Model):

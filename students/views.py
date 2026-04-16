@@ -8,7 +8,7 @@ from django.db.models import Count
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 
-from .models import Assignment, Attendance, Submission, Timetable, Notification, FeedbackForm, FeedbackResponse, Complaint
+from .models import Assignment, Attendance, StaffAttendance, Submission, Timetable, Notification, FeedbackForm, FeedbackResponse, Complaint
 
 User = get_user_model()
 
@@ -29,7 +29,43 @@ def get_attendance(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_timetable(request):
-    data = Timetable.objects.all().values()
+    if getattr(request.user, 'role', None) == 'student':
+        entries = Timetable.objects.filter(is_approved=True)
+    elif _is_faculty_fa_user(request.user):
+        assignment = _get_faculty_fa_assignment(request.user)
+        if assignment:
+            department, year, section = assignment
+            entries = Timetable.objects.filter(
+                department=department,
+                year__in=[year, 'all'],
+                section__in=[section, 'all']
+            )
+        else:
+            entries = Timetable.objects.none()
+    else:
+        entries = Timetable.objects.all()
+
+    data = []
+    for item in entries:
+        data.append({
+            "id": item.id,
+            "department": item.department,
+            "year": item.year,
+            "section": item.section,
+            "semester": item.semester,
+            "subject_code": item.subject_code,
+            "subject": item.subject,
+            "faculty": item.faculty,
+            "faculty_id": item.faculty_user.id if item.faculty_user else None,
+            "created_by": item.created_by.username if item.created_by else None,
+            "approved_by": item.approved_by.username if item.approved_by else None,
+            "approved_at": item.approved_at,
+            "is_approved": item.is_approved,
+            "day": item.day,
+            "time": item.time,
+            "period": item.period,
+            "credits": item.credits,
+        })
     return Response(data)
 
 
@@ -93,7 +129,19 @@ def my_submissions(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_submissions(request):
-    submissions = Submission.objects.select_related('student', 'assignment')
+    if _is_faculty_fa_user(request.user):
+        assignment = _get_faculty_fa_assignment(request.user)
+        if assignment:
+            department, year, section = assignment
+            submissions = Submission.objects.select_related('student', 'assignment').filter(
+                student__department=department,
+                student__year=year,
+                student__section=section,
+            )
+        else:
+            submissions = Submission.objects.none()
+    else:
+        submissions = Submission.objects.select_related('student', 'assignment')
 
     data = []
     for s in submissions:
@@ -126,6 +174,15 @@ def grade_submission(request):
     except Submission.DoesNotExist:
         return Response({"error": "Invalid submission"}, status=400)
 
+    if _is_faculty_fa_user(request.user):
+        assignment = _get_faculty_fa_assignment(request.user)
+        if assignment and not (
+            submission.student.department == assignment[0] and
+            submission.student.year == assignment[1] and
+            submission.student.section == assignment[2]
+        ):
+            return Response({"error": "Permission denied: cannot grade this submission"}, status=403)
+
     submission.marks = marks
     submission.feedback = feedback
     submission.save()
@@ -144,7 +201,7 @@ def get_notifications(request):
         models.Q(scheduled_time__isnull=True) | models.Q(scheduled_time__gte=now_time)
     )
 
-    if request.user.role not in ['staff', 'admin']:
+    if request.user.role != 'admin':
         notifications = notifications.filter(student=request.user)
 
     data = []
@@ -167,9 +224,20 @@ def create_notification(request):
     title = request.data.get("title")
     message = request.data.get("message")
 
-    department = request.data.get("department")
-    year = request.data.get("year")
-    section = request.data.get("section")
+    department = request.data.get("department", "all")
+    year = request.data.get("year", "all")
+    section = request.data.get("section", "all")
+    target = request.data.get("target", "all").lower()
+
+    if _is_hod_user(request.user) and getattr(request.user, 'department', None):
+        department = request.user.department
+
+    if _is_faculty_fa_user(request.user):
+        if target != 'students':
+            return Response({"error": "Permission denied: FA can only send student notifications"}, status=403)
+        permission_denied = _faculty_fa_class_permission(request, department, year, section, allow_all=False)
+        if permission_denied:
+            return permission_denied
 
     scheduled_time_raw = request.data.get("scheduled_time")
     scheduled_time = None
@@ -181,9 +249,35 @@ def create_notification(request):
             else:
                 scheduled_time = parsed_scheduled_time
 
-    file = request.FILES.get("file")
+    staff_ids = []
+    if hasattr(request.data, 'getlist'):
+        staff_ids = request.data.getlist('staff_ids')
+    else:
+        staff_ids = request.data.get('staff_ids') or []
+
+    if isinstance(staff_ids, str):
+        staff_ids = [value.strip() for value in staff_ids.split(',') if value.strip()]
+    staff_ids = [int(value) for value in staff_ids if str(value).isdigit()]
+
+    if not title or not title.strip() or not message or not message.strip():
+        return Response({"error": "Title and message are required."}, status=400)
 
     users = User.objects.filter(is_active=True)
+    if target == "students":
+        users = users.filter(role='student')
+        if year not in [None, '', 'all']:
+            users = users.filter(year=year)
+        if section not in [None, '', 'all']:
+            users = users.filter(section=section)
+    elif target == "staff":
+        users = users.filter(role='staff')
+        if staff_ids:
+            users = users.filter(id__in=staff_ids)
+    elif target == "all":
+        pass
+    else:
+        return Response({"error": "Invalid target selection."}, status=400)
+
     if department and department != 'all':
         users = users.filter(department=department)
     if year and year != 'all':
@@ -191,6 +285,14 @@ def create_notification(request):
     if section and section != 'all':
         users = users.filter(section=section)
 
+    if target == 'staff' and staff_ids and users.count() == 0:
+        return Response({"error": "No staff members found for the selected staff IDs."}, status=400)
+    if target == 'students' and users.count() == 0:
+        return Response({"error": "No student recipients found for the selected year/section."}, status=400)
+    if target == 'all' and users.count() == 0:
+        return Response({"error": "No recipients found."}, status=400)
+
+    file = request.FILES.get("file")
     file_name = None
     file_content = None
     if file:
@@ -199,14 +301,14 @@ def create_notification(request):
 
     for user in users:
         notification = Notification(
-            title=title,
-            message=message,
+            title=title.strip(),
+            message=message.strip(),
             department=department,
             year=year,
             section=section,
             scheduled_time=scheduled_time,
             created_by=request.user,
-            student=user 
+            student=user,
         )
         if file and file_content is not None:
             notification.file.save(file_name, ContentFile(file_content), save=False)
@@ -232,6 +334,11 @@ def create_timetable(request):
     subject_code = request.data.get("subject_code")
     subject_name = request.data.get("subject_name")
     credits = request.data.get("credits")
+
+    if _is_faculty_fa_user(request.user):
+        permission_denied = _faculty_fa_class_permission(request, department, year, section, allow_all=False)
+        if permission_denied:
+            return permission_denied
 
     if not all([department, year, section, semester, day, period, faculty_id, subject_name, credits]):
         return Response({"error": "Missing required fields"}, status=400)
@@ -260,7 +367,7 @@ def create_timetable(request):
     if not time_value:
         return Response({"error": "Invalid period"}, status=400)
 
-    Timetable.objects.create(
+    entry = Timetable.objects.create(
         department=department,
         year=year,
         section=section,
@@ -268,13 +375,18 @@ def create_timetable(request):
         subject_code=subject_code,
         subject=subject_name,
         faculty=faculty.get_full_name() or faculty.username,
+        faculty_user=faculty,
+        created_by=request.user,
+        is_approved=getattr(request.user, 'role', None) in ['hod', 'admin'],
+        approved_by=request.user if getattr(request.user, 'role', None) in ['hod', 'admin'] else None,
+        approved_at=now() if getattr(request.user, 'role', None) in ['hod', 'admin'] else None,
         day=day,
         time=time_value,
         period=str(period),
         credits=credits_value,
     )
 
-    return Response({"message": "Timetable entry created"})
+    return Response({"message": "Timetable entry created", "id": entry.id})
 
 
 # ✅ DELETE TIMETABLE
@@ -289,8 +401,304 @@ def delete_timetable(request, id):
     except Timetable.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
+    if _is_faculty_fa_user(request.user):
+        assignment = _get_faculty_fa_assignment(request.user)
+        if assignment and not (
+            timetable.department == assignment[0] and
+            timetable.year == assignment[1] and
+            timetable.section == assignment[2]
+        ):
+            return Response({"error": "Permission denied: cannot delete timetable for other class"}, status=403)
+
     timetable.delete()
     return Response({"message": "Deleted"})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_sent_notifications(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    notifications = Notification.objects.filter(created_by=request.user).order_by('-id')
+    data = []
+    for n in notifications:
+        data.append({
+            "id": n.id,
+            "title": n.title,
+            "message": n.message,
+            "department": n.department,
+            "year": n.year,
+            "section": n.section,
+            "scheduled_time": n.scheduled_time,
+            "file": n.file.url if n.file else None,
+            "recipient_role": n.student.role if n.student else None,
+            "recipient_username": n.student.username if n.student else None,
+            "recipient_id": n.student.id if n.student else None,
+        })
+
+    return Response(data)
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def hod_edit_notification(request, id):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    try:
+        notification = Notification.objects.get(id=id, created_by=request.user)
+    except Notification.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    notification.title = request.data.get("title", notification.title)
+    notification.message = request.data.get("message", notification.message)
+    notification.year = request.data.get("year", notification.year)
+    notification.section = request.data.get("section", notification.section)
+    if getattr(request.user, 'department', None):
+        notification.department = request.user.department
+
+    scheduled_time_raw = request.data.get("scheduled_time")
+    if scheduled_time_raw:
+        parsed_scheduled_time = parse_datetime(scheduled_time_raw)
+        if parsed_scheduled_time is not None:
+            if parsed_scheduled_time.tzinfo is None:
+                notification.scheduled_time = make_aware(parsed_scheduled_time, get_current_timezone())
+            else:
+                notification.scheduled_time = parsed_scheduled_time
+
+    file = request.FILES.get("file")
+    if file:
+        notification.file.save(file.name, ContentFile(file.read()), save=False)
+
+    notification.save()
+    return Response({"message": "Notification updated"})
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def hod_delete_notification(request, id):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    try:
+        notification = Notification.objects.get(id=id, created_by=request.user)
+    except Notification.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    notification.delete()
+    return Response({"message": "Deleted"})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_results_summary(request):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    department = request.user.department
+    students = User.objects.filter(role='student', department=department)
+    summaries = []
+
+    for student in students:
+        scores = Submission.objects.filter(student=student, marks__isnull=False).values_list('marks', flat=True)
+        if scores:
+            summaries.append(sum(scores) / len(scores))
+
+    if not summaries:
+        return Response({
+            "pass_ratio": 0,
+            "fail_ratio": 0,
+            "top_performers_ratio": 0,
+            "low_performers_ratio": 0,
+            "student_count": students.count(),
+        })
+
+    threshold = 40
+    sorted_scores = sorted(summaries, reverse=True)
+    pass_count = len([s for s in sorted_scores if s >= threshold])
+    fail_count = len([s for s in sorted_scores if s < threshold])
+    student_count = len(sorted_scores)
+    top_count = max(1, round(student_count * 0.1))
+    low_count = max(1, round(student_count * 0.1))
+
+    return Response({
+        "pass_ratio": round((pass_count / student_count) * 100, 2),
+        "fail_ratio": round((fail_count / student_count) * 100, 2),
+        "top_performers_ratio": round((top_count / student_count) * 100, 2),
+        "low_performers_ratio": round((low_count / student_count) * 100, 2),
+        "student_count": student_count,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_subject_performance(request):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    department = request.user.department
+    subject_data = Submission.objects.filter(
+        student__role='student',
+        student__department=department,
+        marks__isnull=False
+    ).values(
+        subject=models.F('assignment__subject')
+    ).annotate(
+        average=models.Avg('marks'),
+        count=models.Count('id')
+    ).order_by('-average')
+
+    weak_subjects = [s['subject'] for s in subject_data if s['average'] is not None and s['average'] < 50]
+
+    return Response({
+        "subjects": [
+            {
+                "subject": s['subject'],
+                "average": round(s['average'] or 0, 2),
+                "count": s['count'],
+            } for s in subject_data
+        ],
+        "weak_subjects": weak_subjects,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_staff_performance(request):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    department = request.user.department
+    staff_members = User.objects.filter(role='staff', department=department)
+    result = []
+
+    for member in staff_members:
+        subjects = list(Timetable.objects.filter(faculty_user=member).values_list('subject', flat=True).distinct())
+        scores = Submission.objects.filter(
+            assignment__subject__in=subjects,
+            marks__isnull=False
+        ).values_list('marks', flat=True)
+        feedback_count = FeedbackResponse.objects.filter(form__faculty=member).count()
+
+        result.append({
+            "id": member.id,
+            "username": member.username,
+            "name": f"{member.first_name} {member.last_name}".strip(),
+            "designation": member.designation,
+            "subjects_handled": subjects,
+            "average_marks": round(sum(scores) / len(scores), 2) if scores else None,
+            "feedback_count": feedback_count,
+        })
+
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_feedback_summary(request):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    department = request.user.department
+    staff_members = User.objects.filter(role='staff', department=department)
+    summary = []
+
+    for member in staff_members:
+        feedback_forms = FeedbackForm.objects.filter(faculty=member)
+        response_count = FeedbackResponse.objects.filter(form__faculty=member).count()
+        summary.append({
+            "id": member.id,
+            "username": member.username,
+            "name": f"{member.first_name} {member.last_name}".strip(),
+            "designation": member.designation,
+            "feedback_form_count": feedback_forms.count(),
+            "feedback_response_count": response_count,
+        })
+
+    return Response(summary)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_timetables(request):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    department = request.user.department
+    entries = Timetable.objects.filter(department=department)
+    data = []
+    for item in entries:
+        data.append({
+            "id": item.id,
+            "department": item.department,
+            "year": item.year,
+            "section": item.section,
+            "semester": item.semester,
+            "subject": item.subject,
+            "faculty": item.faculty,
+            "faculty_id": item.faculty_user.id if item.faculty_user else None,
+            "created_by": item.created_by.username if item.created_by else None,
+            "approved_by": item.approved_by.username if item.approved_by else None,
+            "approved_at": item.approved_at,
+            "is_approved": item.is_approved,
+            "day": item.day,
+            "time": item.time,
+            "period": item.period,
+            "credits": item.credits,
+        })
+
+    clashes = []
+    seen = {}
+    for item in entries:
+        key = (item.department, item.year, item.section, item.day, item.time)
+        if key in seen:
+            clashes.append(item.id)
+            clashes.append(seen[key])
+        else:
+            seen[key] = item.id
+
+    return Response({"timetables": data, "clash_ids": list(set(clashes))})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def hod_approve_timetable(request, id):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    try:
+        item = Timetable.objects.get(id=id)
+    except Timetable.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    item.is_approved = True
+    item.approved_by = request.user
+    item.approved_at = now()
+    item.save()
+    return Response({"message": "Timetable approved"})
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def hod_update_timetable(request, id):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+
+    try:
+        item = Timetable.objects.get(id=id)
+    except Timetable.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    item.subject = request.data.get("subject", item.subject)
+    item.day = request.data.get("day", item.day)
+    item.time = request.data.get("time", item.time)
+    item.period = request.data.get("period", item.period)
+    if request.data.get("is_approved") is not None:
+        item.is_approved = request.data.get("is_approved") in [True, "true", "True", 1, "1"]
+    item.save()
+    return Response({"message": "Timetable updated"})
 
 
 # ✅ COUNT
@@ -394,6 +802,227 @@ def check_low_attendance(request):
     return Response({"message": "Attendance checked"})
 
 
+def _attendance_percentage_for_student(student):
+    total = Attendance.objects.filter(student=student).count()
+    if total == 0:
+        return None
+    present = Attendance.objects.filter(student=student, status='present').count()
+    return round((present / total) * 100, 2)
+
+
+def _attendance_percentage_for_staff(staff_member):
+    total = StaffAttendance.objects.filter(staff=staff_member).count()
+    if total == 0:
+        return None
+    present = StaffAttendance.objects.filter(staff=staff_member, status='present').count()
+    return round((present / total) * 100, 2)
+
+
+def _is_hod_user(user):
+    role = str(getattr(user, 'role', '') or '').strip().lower()
+    designation = str(getattr(user, 'designation', '') or '').strip().lower()
+    return role == 'hod' or designation == 'hod' or (role == 'staff' and designation == 'hod')
+
+
+def _is_faculty_fa_user(user):
+    return bool(getattr(user, 'is_faculty_fa', False))
+
+
+def _get_faculty_fa_assignment(user):
+    if not _is_faculty_fa_user(user):
+        return None
+    department = getattr(user, 'faculty_fa_department', None)
+    year = getattr(user, 'faculty_fa_year', None)
+    section = getattr(user, 'faculty_fa_section', None)
+    if department and year and section:
+        return (department, year, section)
+    return None
+
+
+def _matches_faculty_fa_class(assignment, department, year, section, allow_all=False):
+    if not assignment:
+        return True
+    assigned_department, assigned_year, assigned_section = assignment
+    if department != assigned_department:
+        return False
+    if allow_all:
+        if year not in [assigned_year, 'all', None, '']:
+            return False
+        if section not in [assigned_section, 'all', None, '']:
+            return False
+    else:
+        if year != assigned_year:
+            return False
+        if section != assigned_section:
+            return False
+    return True
+
+
+def _faculty_fa_class_permission(request, department, year, section, allow_all=False):
+    assignment = _get_faculty_fa_assignment(request.user)
+    if not assignment:
+        return None
+    if not _matches_faculty_fa_class(assignment, department, year, section, allow_all=allow_all):
+        return Response({"error": "Permission denied: FA can only access assigned class"}, status=403)
+    return None
+
+
+def _hod_permissions(request):
+    if not _is_hod_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+    return None
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_overview(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    department = request.user.department
+    students = User.objects.filter(role='student', department=department)
+    staff = User.objects.filter(role='staff', department=department)
+
+    low_students_count = 0
+    for student in students:
+        percentage = _attendance_percentage_for_student(student)
+        if percentage is not None and percentage < 75:
+            low_students_count += 1
+
+    low_staff_count = 0
+    for member in staff:
+        percentage = _attendance_percentage_for_staff(member)
+        if percentage is not None and percentage < 75:
+            low_staff_count += 1
+
+    return Response({
+        "student_count": students.count(),
+        "staff_count": staff.count(),
+        "low_attendance_students_count": low_students_count,
+        "low_attendance_staff_count": low_staff_count,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_students(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    department = request.user.department
+    students = User.objects.filter(role='student', department=department)
+
+    data = []
+    for student in students:
+        data.append({
+            "id": student.id,
+            "username": student.username,
+            "first_name": student.first_name,
+            "last_name": student.last_name,
+            "salutation": student.salutation,
+            "email": student.email,
+            "department": student.department,
+            "year": student.year,
+            "section": student.section,
+            "attendance_percentage": _attendance_percentage_for_student(student),
+        })
+
+    return Response(data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_staff(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    department = request.user.department
+    staff = User.objects.filter(role='staff', department=department)
+
+    data = []
+    for member in staff:
+        data.append({
+            "id": member.id,
+            "username": member.username,
+            "first_name": member.first_name,
+            "last_name": member.last_name,
+            "salutation": member.salutation,
+            "email": member.email,
+            "designation": member.designation,
+            "is_faculty_fa": member.is_faculty_fa,
+            "is_subject_holder": member.is_subject_holder,
+            "department": member.department,
+            "section": member.section,
+        })
+
+    return Response(data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_low_students(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    department = request.user.department
+    students = User.objects.filter(role='student', department=department)
+
+    low_students = []
+    for student in students:
+        percentage = _attendance_percentage_for_student(student)
+        if percentage is not None and percentage < 75:
+            low_students.append({
+                "id": student.id,
+                "username": student.username,
+                "first_name": student.first_name,
+                "last_name": student.last_name,
+                "salutation": student.salutation,
+                "email": student.email,
+                "department": student.department,
+                "year": student.year,
+                "section": student.section,
+                "attendance_percentage": percentage,
+            })
+
+    return Response(low_students)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_low_staff(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    department = request.user.department
+    staff_members = User.objects.filter(role='staff', department=department)
+
+    low_staff = []
+    for member in staff_members:
+        percentage = _attendance_percentage_for_staff(member)
+        if percentage is not None and percentage < 75:
+            low_staff.append({
+                "id": member.id,
+                "username": member.username,
+                "first_name": member.first_name,
+                "last_name": member.last_name,
+                "salutation": member.salutation,
+                "email": member.email,
+                "designation": member.designation,
+                "is_faculty_fa": member.is_faculty_fa,
+                "is_subject_holder": member.is_subject_holder,
+                "department": member.department,
+                "section": member.section,
+                "attendance_percentage": percentage,
+            })
+
+    return Response(low_staff)
+
+
 # ✅ FEEDBACK FORMS
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -412,7 +1041,19 @@ def get_feedback_forms(request):
         if semester:
             forms = forms.filter(semester=semester)
     else:
-        forms = FeedbackForm.objects.all()
+        if _is_faculty_fa_user(request.user):
+            assignment = _get_faculty_fa_assignment(request.user)
+            if assignment:
+                department, year, section = assignment
+                forms = FeedbackForm.objects.filter(
+                    department=department,
+                    year__in=[year, 'all'],
+                    section__in=[section, 'all']
+                )
+            else:
+                forms = FeedbackForm.objects.none()
+        else:
+            forms = FeedbackForm.objects.all()
 
     data = []
     for form in forms:
@@ -455,6 +1096,11 @@ def create_feedback_form(request):
 
     if form_type == "course":
         form_type = "semester"
+
+    if _is_faculty_fa_user(request.user):
+        permission_denied = _faculty_fa_class_permission(request, department, year, section, allow_all=False)
+        if permission_denied:
+            return permission_denied
 
     if not all([title, department, year, section, semester, subject]):
         return Response({"error": "Missing required fields"}, status=400)
@@ -569,6 +1215,8 @@ def submit_complaint(request):
 @permission_classes([IsAuthenticated])
 def get_available_faculties(request):
     faculties = User.objects.filter(role='staff').order_by('username')
+    if _is_hod_user(request.user) and getattr(request.user, 'department', None):
+        faculties = faculties.filter(department=request.user.department)
     data = []
     for faculty in faculties:
         data.append({
@@ -588,7 +1236,19 @@ def get_feedback_results(request):
     if not is_staff_user(request.user):
         return Response({"error": "Permission denied"}, status=403)
 
-    forms = FeedbackForm.objects.all()
+    if _is_faculty_fa_user(request.user):
+        assignment = _get_faculty_fa_assignment(request.user)
+        if assignment:
+            department, year, section = assignment
+            forms = FeedbackForm.objects.filter(
+                department=department,
+                year__in=[year, 'all'],
+                section__in=[section, 'all']
+            )
+        else:
+            forms = FeedbackForm.objects.none()
+    else:
+        forms = FeedbackForm.objects.all()
 
     data = []
     for form in forms:
