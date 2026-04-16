@@ -796,17 +796,9 @@ def hod_update_timetable(request, id):
     except Timetable.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
-    if item.approval_status == 'approved':
-        return Response({"error": "Cannot edit approved timetable entry"}, status=403)
-
     department = request.data.get("department", item.department)
     year = request.data.get("year", item.year)
     section = request.data.get("section", item.section)
-
-    if _is_faculty_fa_user(request.user):
-        permission_denied = _faculty_fa_class_permission(request, department, year, section, allow_all=False)
-        if permission_denied:
-            return permission_denied
 
     item.department = department
     item.year = year
