@@ -30,22 +30,51 @@ def get_attendance(request):
 @permission_classes([IsAuthenticated])
 def get_timetable(request):
     role = getattr(request.user, 'role', None)
+    department = request.GET.get('department')
+    year = request.GET.get('year')
+    section = request.GET.get('section')
+    semester = request.GET.get('semester')
+
     if role == 'student':
-        entries = Timetable.objects.filter(approval_status='approved')
+        department = request.user.department
+        year = request.user.year
+        section = request.user.section
+        entries = Timetable.objects.filter(
+            approval_status='approved',
+            department=department,
+            year=year,
+            section=section,
+        )
+        if semester:
+            entries = entries.filter(semester=semester)
     elif _is_hod_user(request.user):
         department = request.user.department
         entries = Timetable.objects.filter(department=department).exclude(approval_status='draft')
+        if year:
+            entries = entries.filter(year=year)
+        if section:
+            entries = entries.filter(section=section)
+        if semester:
+            entries = entries.filter(semester=semester)
     else:
         entries = Timetable.objects.filter(created_by=request.user)
         if _is_faculty_fa_user(request.user):
             assignment = _get_faculty_fa_assignment(request.user)
             if assignment:
-                department, year, section = assignment
+                assigned_department, assigned_year, assigned_section = assignment
                 entries = entries | Timetable.objects.filter(
-                    department=department,
-                    year=year,
-                    section=section
+                    department=assigned_department,
+                    year=assigned_year,
+                    section=assigned_section
                 )
+        if department:
+            entries = entries.filter(department=department)
+        if year:
+            entries = entries.filter(year=year)
+        if section:
+            entries = entries.filter(section=section)
+        if semester:
+            entries = entries.filter(semester=semester)
 
     entries = entries.distinct()
 
@@ -691,6 +720,12 @@ def hod_approve_timetable(request, id):
     item.approved_by = request.user
     item.approved_at = now()
     item.save()
+
+    if item.faculty_user:
+        title = "Timetable Approved"
+        message = _format_hod_timetable_message(item, 'approved')
+        _create_notification_for_user(item.faculty_user, title, message, item.department, item.year, item.section, request.user)
+
     return Response({"message": "Timetable approved"})
 
 
@@ -785,7 +820,7 @@ def update_timetable(request, id):
     return Response({"message": "Timetable updated"})
 
 
-@api_view(['PUT', 'PATCH'])
+@api_view(['POST', 'PUT', 'PATCH'])
 @permission_classes([IsAuthenticated])
 def hod_update_timetable(request, id):
     if not _is_hod_user(request.user):
@@ -795,6 +830,8 @@ def hod_update_timetable(request, id):
         item = Timetable.objects.get(id=id)
     except Timetable.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
+
+    old_faculty_user = item.faculty_user
 
     department = request.data.get("department", item.department)
     year = request.data.get("year", item.year)
@@ -843,6 +880,32 @@ def hod_update_timetable(request, id):
 
     item.hod_comment = request.data.get("hod_comment", item.hod_comment)
     item.save()
+
+    notification_recipients = []
+    if old_faculty_user and old_faculty_user != item.faculty_user:
+        notification_recipients.append(old_faculty_user)
+    if item.faculty_user:
+        notification_recipients.append(item.faculty_user)
+
+    notification_recipients = list({user.id: user for user in notification_recipients}.values())
+    comment_text = item.hod_comment or None
+
+    if item.approval_status == 'approved':
+        title = "Timetable Approved"
+        message = _format_hod_timetable_message(item, 'approved', comment_text)
+    elif item.approval_status == 'rejected':
+        title = "Timetable Rejected"
+        message = _format_hod_timetable_message(item, 'rejected', comment_text)
+    elif item.approval_status == 'rework_assigned':
+        title = "Timetable Rework Requested"
+        message = _format_hod_timetable_message(item, 'sent back for rework', comment_text)
+    else:
+        title = "Timetable Updated"
+        message = _format_hod_timetable_message(item, 'updated', comment_text)
+
+    for recipient in notification_recipients:
+        _create_notification_for_user(recipient, title, message, item.department, item.year, item.section, request.user)
+
     return Response({"message": "Timetable updated"})
 
 
@@ -1025,6 +1088,30 @@ def _staff_timetable_edit_permission(request, timetable):
             return None
 
     return Response({"error": "Permission denied"}, status=403)
+
+
+def _format_hod_timetable_message(item, action, comment=None):
+    subject_desc = item.subject_code or item.subject or "the subject"
+    class_desc = f"{item.department} {item.year}{item.section}"
+    comment_text = f" Comment: {comment}" if comment else ""
+    return (
+        f"Timetable entry for {class_desc} ({item.semester} sem, {item.day} {item.time}) - "
+        f"{subject_desc} has been {action}.{comment_text}"
+    )
+
+
+def _create_notification_for_user(user, title, message, department, year, section, created_by):
+    if not user:
+        return None
+    Notification.objects.create(
+        title=title,
+        message=message,
+        department=department or "all",
+        year=year or "all",
+        section=section or "all",
+        created_by=created_by,
+        student=user,
+    )
 
 
 def _hod_permissions(request):
