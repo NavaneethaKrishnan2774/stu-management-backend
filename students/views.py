@@ -8,7 +8,7 @@ from django.db.models import Count
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 
-from .models import Assignment, Attendance, StaffAttendance, Submission, Timetable, Notification, FeedbackForm, FeedbackResponse, Complaint
+from .models import Assignment, Attendance, StaffAttendance, Submission, Timetable, Notification, FeedbackForm, FeedbackResponse, Complaint, PlacementDrive, PlacementOffer, PlacementMessage
 
 User = get_user_model()
 
@@ -1143,11 +1143,23 @@ def hod_overview(request):
         if percentage is not None and percentage < 75:
             low_staff_count += 1
 
+    # Get placement drives for this department
+    placement_drives = PlacementDrive.objects.filter(department=department)
+    active_drives_count = placement_drives.filter(drive_date__gte=now().date()).count()
+    
+    # Count shortlisted students (students with placement offers)
+    shortlisted_students_count = PlacementOffer.objects.filter(
+        drive__department=department,
+        status__in=['applied', 'shortlisted', 'placed']
+    ).values('student').distinct().count()
+
     return Response({
         "student_count": students.count(),
         "staff_count": staff.count(),
         "low_attendance_students_count": low_students_count,
         "low_attendance_staff_count": low_staff_count,
+        "placement_drives_count": active_drives_count,
+        "shortlisted_students_count": shortlisted_students_count,
     })
 
 
@@ -1536,3 +1548,364 @@ def delete_feedback_summary(request, form_id):
     return Response({
         "message": f"{deleted_count} feedback responses deleted successfully"
     })
+
+
+# PLACEMENT VIEWS
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def placement_departments(request):
+    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    departments = [
+        {'code': 'CSE', 'name': 'Computer Science Engineering'},
+        {'code': 'ECE', 'name': 'Electronics and Communication Engineering'},
+        {'code': 'EEE', 'name': 'Electrical and Electronics Engineering'},
+        {'code': 'MECH', 'name': 'Mechanical Engineering'},
+        {'code': 'CIVIL', 'name': 'Civil Engineering'},
+    ]
+    return Response(departments)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def placement_students(request, department):
+    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    students = User.objects.filter(role='student', department=department).order_by('first_name', 'last_name')
+    
+    # Get attendance percentages
+    student_data = []
+    for student in students:
+        attendance_percentage = _attendance_percentage_for_student(student)
+        placed_offers = PlacementOffer.objects.filter(student=student, status='placed').count()
+        
+        student_data.append({
+            'id': student.id,
+            'register_number': student.username,
+            'name': f"{student.first_name} {student.last_name}".strip(),
+            'class': f"{student.year} {student.section}",
+            'year': student.year,
+            'section': student.section,
+            'cgpa': float(student.cgpa) if student.cgpa else None,
+            'current_arrears': student.current_arrears,
+            'arrears_history': student.arrears_history,
+            'resume': student.resume.url if student.resume else None,
+            'job_offers': student.job_offers_count,
+            'email': student.email,
+            'mobile': student.mobile,
+            'attendance_percentage': attendance_percentage,
+            'placed': placed_offers > 0,
+        })
+    
+    # Sort: placed students first, then by attendance desc if any placed, else alphabetical
+    placed_students = [s for s in student_data if s['placed']]
+    unplaced_students = [s for s in student_data if not s['placed']]
+    
+    if placed_students:
+        # Sort placed by name
+        placed_students.sort(key=lambda x: x['name'])
+        # Sort unplaced by attendance desc, then name
+        unplaced_students.sort(key=lambda x: (-(x['attendance_percentage'] or 0), x['name']))
+    else:
+        # No placed students, sort all by name
+        unplaced_students.sort(key=lambda x: x['name'])
+    
+    return Response(placed_students + unplaced_students)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_placement_drive(request):
+    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    company_name = request.data.get('company_name')
+    drive_date = request.data.get('drive_date')
+    department = request.data.get('department')
+    criteria = request.data.get('criteria')
+    document = request.FILES.get('document')
+    
+    if not all([company_name, drive_date, department]):
+        return Response({"error": "Missing required fields"}, status=400)
+    
+    drive = PlacementDrive.objects.create(
+        company_name=company_name,
+        drive_date=drive_date,
+        department=department,
+        criteria=criteria,
+        document=document,
+        created_by=request.user,
+    )
+    
+    # Auto-select eligible students
+    eligible_students = _get_eligible_students(drive)
+    for student in eligible_students:
+        PlacementOffer.objects.create(
+            student=student,
+            drive=drive,
+            status='applied'
+        )
+    
+    # Send drive details to eligible students
+    if eligible_students:
+        message_text = f"New placement drive: {company_name} on {drive_date}. Please check your dashboard for details."
+        placement_message = PlacementMessage.objects.create(
+            sender=request.user,
+            subject=f"Placement Drive: {company_name}",
+            message=message_text,
+            drive=drive,
+        )
+        placement_message.recipients.set(eligible_students)
+    
+    # Create notifications for eligible students
+    if eligible_students:
+        notification_title = f"New Placement Drive: {company_name}"
+        notification_message = f"A new placement drive for {company_name} has been scheduled on {drive_date}. Check the Development module for details and eligibility criteria."
+        
+        for student in eligible_students:
+            Notification.objects.create(
+                title=notification_title,
+                message=notification_message,
+                department=department,
+                created_by=request.user,
+                student=student,
+            )
+    
+    # Create notification for HOD of the department
+    try:
+        hod_user = User.objects.filter(
+            role__in=['hod', 'staff'],
+            department=department,
+            designation__in=['hod', 'HOD']
+        ).first()
+        
+        if hod_user:
+            hod_notification_title = f"New Placement Drive Created: {company_name}"
+            hod_notification_message = f"A new placement drive for {company_name} has been created for {department} department. {len(eligible_students)} students are eligible. Please review in your dashboard."
+            
+            Notification.objects.create(
+                title=hod_notification_title,
+                message=hod_notification_message,
+                department=department,
+                created_by=request.user,
+                student=hod_user,
+            )
+    except Exception as e:
+        # Log error but don't fail the drive creation
+        print(f"Error creating HOD notification: {e}")
+    
+    return Response({"message": f"Drive created and sent to {eligible_students.count()} eligible students", "drive_id": drive.id})
+
+
+def _get_eligible_students(drive):
+    """Filter students based on company criteria"""
+    students = User.objects.filter(role='student', department=drive.department)
+    
+    # Parse criteria (assuming JSON format like {"cgpa": ">=8.0", "arrears": "<=2"})
+    try:
+        import json
+        criteria = json.loads(drive.criteria) if drive.criteria else {}
+    except:
+        criteria = {}
+    
+    if 'cgpa' in criteria:
+        op, value = _parse_criteria(criteria['cgpa'])
+        cgpa_value = float(value)
+        if op == '>=':
+            students = students.filter(cgpa__gte=cgpa_value)
+        elif op == '>':
+            students = students.filter(cgpa__gt=cgpa_value)
+        elif op == '<=':
+            students = students.filter(cgpa__lte=cgpa_value)
+        elif op == '<':
+            students = students.filter(cgpa__lt=cgpa_value)
+        elif op == '==':
+            students = students.filter(cgpa=cgpa_value)
+    
+    if 'arrears' in criteria:
+        op, value = _parse_criteria(criteria['arrears'])
+        arrears_value = int(value)
+        if op == '>=':
+            students = students.filter(current_arrears__gte=arrears_value)
+        elif op == '>':
+            students = students.filter(current_arrears__gt=arrears_value)
+        elif op == '<=':
+            students = students.filter(current_arrears__lte=arrears_value)
+        elif op == '<':
+            students = students.filter(current_arrears__lt=arrears_value)
+        elif op == '==':
+            students = students.filter(current_arrears=arrears_value)
+    
+    return students
+
+
+def _parse_criteria(criterion):
+    """Parse criteria like '>=8.0' into ('>=', '8.0')"""
+    import re
+    match = re.match(r'([<>=!]+)(.+)', criterion.strip())
+    if match:
+        return match.group(1), match.group(2).strip()
+    return '==', criterion.strip()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_placement_message(request):
+    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    subject = request.data.get('subject')
+    message = request.data.get('message')
+    student_ids = request.data.get('student_ids', [])
+    drive_id = request.data.get('drive_id')
+    
+    if not subject or not message:
+        return Response({"error": "Subject and message required"}, status=400)
+    
+    if isinstance(student_ids, str):
+        student_ids = [int(x.strip()) for x in student_ids.split(',') if x.strip()]
+    
+    students = User.objects.filter(id__in=student_ids, role='student')
+    
+    placement_message = PlacementMessage.objects.create(
+        sender=request.user,
+        subject=subject,
+        message=message,
+        drive_id=drive_id,
+    )
+    
+    placement_message.recipients.set(students)
+    
+    return Response({"message": f"Message sent to {students.count()} students"})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def placement_drives(request):
+    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    drives = PlacementDrive.objects.filter(created_by=request.user).order_by('-created_at')
+    data = []
+    for drive in drives:
+        offers = PlacementOffer.objects.filter(drive=drive)
+        placed_count = offers.filter(status='placed').count()
+        applied_count = offers.filter(status='applied').count()
+        
+        data.append({
+            'id': drive.id,
+            'company_name': drive.company_name,
+            'drive_date': drive.drive_date,
+            'department': drive.department,
+            'criteria': drive.criteria,
+            'document': drive.document.url if drive.document else None,
+            'applied_count': applied_count,
+            'placed_count': placed_count,
+        })
+    
+    return Response(data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def hod_placement_drives(request):
+    permission_denied = _hod_permissions(request)
+    if permission_denied:
+        return permission_denied
+
+    department = request.user.department
+    drives = PlacementDrive.objects.filter(department=department).order_by('-drive_date')
+
+    data = []
+    for drive in drives:
+        # Get placement offers for this drive
+        offers = PlacementOffer.objects.filter(drive=drive).select_related('student')
+        
+        shortlisted_students = []
+        placed_count = 0
+        
+        for offer in offers:
+            if offer.status in ['applied', 'shortlisted', 'placed']:
+                shortlisted_students.append({
+                    'id': offer.student.id,
+                    'name': offer.student.get_full_name() or offer.student.username,
+                    'register_number': offer.student.register_number,
+                    'cgpa': float(offer.student.cgpa) if offer.student.cgpa else None,
+                    'status': offer.status,
+                })
+                if offer.status == 'placed':
+                    placed_count += 1
+
+        data.append({
+            'id': drive.id,
+            'company_name': drive.company_name,
+            'drive_date': drive.drive_date,
+            'department': drive.department,
+            'criteria': drive.criteria,
+            'document': drive.document.url if drive.document else None,
+            'shortlisted_count': len(shortlisted_students),
+            'placed_count': placed_count,
+            'shortlisted_students': shortlisted_students,
+        })
+
+    return Response(data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def student_placement_drives(request):
+    if request.user.role != 'student':
+        return Response({"error": "Permission denied"}, status=403)
+
+    department = request.user.department
+    drives = PlacementDrive.objects.filter(department=department).order_by('-drive_date')
+
+    data = []
+    for drive in drives:
+        # Get all placement offers for this drive
+        offers = PlacementOffer.objects.filter(drive=drive).select_related('student')
+        
+        # Find current student's offer
+        my_offer = offers.filter(student=request.user).first()
+        my_status = my_offer.status if my_offer else 'not_applied'
+        
+        # Get attendee information (applied, shortlisted, placed students)
+        attendees = []
+        total_applied = 0
+        total_shortlisted = 0
+        total_placed = 0
+        
+        for offer in offers:
+            if offer.status in ['applied', 'shortlisted', 'placed']:
+                attendees.append({
+                    'id': offer.student.id,
+                    'name': offer.student.get_full_name() or offer.student.username,
+                    'register_number': offer.student.register_number,
+                    'status': offer.status,
+                })
+                
+                if offer.status == 'applied':
+                    total_applied += 1
+                elif offer.status == 'shortlisted':
+                    total_shortlisted += 1
+                elif offer.status == 'placed':
+                    total_placed += 1
+
+        data.append({
+            'id': drive.id,
+            'company_name': drive.company_name,
+            'drive_date': drive.drive_date,
+            'department': drive.department,
+            'criteria': drive.criteria,
+            'document': drive.document.url if drive.document else None,
+            'my_status': my_status,
+            'total_applied': total_applied,
+            'total_shortlisted': total_shortlisted,
+            'total_placed': total_placed,
+            'attendees': attendees,
+        })
+
+    return Response(data)

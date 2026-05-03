@@ -45,4 +45,12 @@ urlpatterns = [
     path('hod/timetables/', views.hod_timetables),
     path('hod/approve-timetable/<int:id>/', views.hod_approve_timetable),
     path('hod/update-timetable/<int:id>/', views.hod_update_timetable),
+    path('hod/placement-drives/', views.hod_placement_drives),
+    path('student/placement-drives/', views.student_placement_drives),
+    # Placement URLs
+    path('placement/departments/', views.placement_departments),
+    path('placement/students/<str:department>/', views.placement_students),
+    path('placement/create-drive/', views.create_placement_drive),
+    path('placement/send-message/', views.send_placement_message),
+    path('placement/drives/', views.placement_drives),
 ]

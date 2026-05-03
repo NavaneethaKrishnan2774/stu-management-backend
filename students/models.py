@@ -256,3 +256,40 @@ class Complaint(models.Model):
         on_delete=models.CASCADE,
         related_name='complaints'
     )
+
+
+class PlacementDrive(models.Model):
+    company_name = models.CharField(max_length=100)
+    drive_date = models.DateField()
+    department = models.CharField(max_length=10, choices=DEPARTMENT_CHOICES)
+    criteria = models.TextField()  # JSON or text with CGPA, arrears, etc.
+    document = models.FileField(upload_to='placement_drives/', blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.company_name} - {self.drive_date}"
+
+
+class PlacementOffer(models.Model):
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='placement_offers')
+    drive = models.ForeignKey(PlacementDrive, on_delete=models.CASCADE)
+    status = models.CharField(max_length=20, choices=[
+        ('applied', 'Applied'),
+        ('shortlisted', 'Shortlisted'),
+        ('placed', 'Placed'),
+        ('rejected', 'Rejected'),
+    ], default='applied')
+    offered_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.student.username} - {self.drive.company_name}"
+
+
+class PlacementMessage(models.Model):
+    sender = models.ForeignKey(User, on_delete=models.CASCADE)
+    recipients = models.ManyToManyField(User, related_name='received_messages')
+    subject = models.CharField(max_length=255)
+    message = models.TextField()
+    sent_at = models.DateTimeField(auto_now_add=True)
+    drive = models.ForeignKey(PlacementDrive, on_delete=models.CASCADE, blank=True, null=True)
