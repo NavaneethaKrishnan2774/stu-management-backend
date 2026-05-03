@@ -8,7 +8,7 @@ from django.db.models import Count
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 
-from .models import Assignment, Attendance, StaffAttendance, Submission, Timetable, Notification, FeedbackForm, FeedbackResponse, Complaint, PlacementDrive, PlacementOffer, PlacementMessage
+from .models import Assignment, Attendance, StaffAttendance, Submission, Timetable, Notification, FeedbackForm, FeedbackResponse, Complaint, PlacementDrive, PlacementOffer, PlacementMessage, PlacementStudentRound
 
 User = get_user_model()
 
@@ -1613,7 +1613,97 @@ def placement_students(request, department):
         # No placed students, sort all by name
         unplaced_students.sort(key=lambda x: x['name'])
     
-    return Response(placed_students + unplaced_students)
+    result = placed_students + unplaced_students
+    return Response({
+        'total_count': len(result),
+        'placed_count': len(placed_students),
+        'students': result,
+    })
+
+
+# ✅ GET FILTERED STUDENTS FOR PLACEMENT DRIVE
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_placement_students_filtered(request):
+    """Get students filtered by department, year, and placement status"""
+    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    department = request.GET.get('department')
+    year = request.GET.get('year')
+    filter_type = request.GET.get('filter', 'all')  # all, placed, offers_2, offers_3, offers_4, offers_5
+    round_filter = request.GET.get('round')  # first, second, third, final
+    
+    # Base queryset
+    students = User.objects.filter(role='student', department=department)
+    
+    if year:
+        students = students.filter(year=year)
+    
+    students = students.order_by('first_name', 'last_name')
+    
+    student_data = []
+    for student in students:
+        # Get placement offers count and status
+        offers = PlacementOffer.objects.filter(student=student)
+        placed_count = offers.filter(placed=True).count()
+        total_offers = offers.count()
+        
+        # Get round clearances
+        rounds_cleared = PlacementStudentRound.objects.filter(
+            student=student,
+            cleared=True
+        ).values_list('round_number', flat=True).distinct()
+        
+        student_info = {
+            'id': student.id,
+            'register_number': student.username,
+            'name': f"{student.first_name} {student.last_name}".strip(),
+            'class': f"{student.year} {student.section}",
+            'year': student.year,
+            'section': student.section,
+            'cgpa': float(student.cgpa) if student.cgpa else 0.0,
+            'current_arrears': student.current_arrears,
+            'arrears_history': student.arrears_history or 'None',
+            'resume': student.resume.url if student.resume else None,
+            'job_offers': student.job_offers_count,
+            'email': student.email,
+            'mobile': student.mobile or 'N/A',
+            'placed': placed_count > 0,
+            'total_offers': total_offers,
+            'rounds_cleared': list(rounds_cleared),
+        }
+        student_data.append(student_info)
+    
+    # Apply filters
+    filtered_data = student_data
+    
+    if filter_type == 'placed':
+        filtered_data = [s for s in filtered_data if s['placed']]
+    elif filter_type.startswith('offers_'):
+        try:
+            offer_count = int(filter_type.split('_')[1])
+            filtered_data = [s for s in filtered_data if s['total_offers'] >= offer_count]
+        except:
+            pass
+    
+    if round_filter and round_filter != 'all':
+        filtered_data = [s for s in filtered_data if round_filter in s['rounds_cleared']]
+    
+    # Sort: placed first, then by name
+    placed = [s for s in filtered_data if s['placed']]
+    not_placed = [s for s in filtered_data if not s['placed']]
+    placed.sort(key=lambda x: x['name'])
+    not_placed.sort(key=lambda x: x['name'])
+    
+    final_list = placed + not_placed
+    
+    return Response({
+        'total_students': len(student_data),
+        'filtered_students': len(final_list),
+        'placed_count': len(placed),
+        'students': final_list,
+    })
 
 
 @api_view(['POST'])

@@ -262,6 +262,7 @@ class PlacementDrive(models.Model):
     company_name = models.CharField(max_length=100)
     drive_date = models.DateField()
     department = models.CharField(max_length=10, choices=DEPARTMENT_CHOICES)
+    year = models.CharField(max_length=1, choices=YEAR_CHOICES, blank=True, null=True)
     criteria = models.TextField()  # JSON or text with CGPA, arrears, etc.
     document = models.FileField(upload_to='placement_drives/', blank=True, null=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -271,19 +272,52 @@ class PlacementDrive(models.Model):
         return f"{self.company_name} - {self.drive_date}"
 
 
-class PlacementOffer(models.Model):
-    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='placement_offers')
+class PlacementStudentRound(models.Model):
+    ROUND_CHOICES = [
+        ('first', 'First Round'),
+        ('second', 'Second Round'),
+        ('third', 'Third Round'),
+        ('final', 'Final Round'),
+    ]
+    
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='round_participations')
     drive = models.ForeignKey(PlacementDrive, on_delete=models.CASCADE)
-    status = models.CharField(max_length=20, choices=[
+    round_number = models.CharField(max_length=20, choices=ROUND_CHOICES)
+    cleared = models.BooleanField(default=False)
+    cleared_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        unique_together = ['student', 'drive', 'round_number']
+    
+    def __str__(self):
+        return f"{self.student.username} - {self.drive.company_name} - {self.round_number} - {'Cleared' if self.cleared else 'Not Cleared'}"
+
+
+class PlacementOffer(models.Model):
+    STATUS_CHOICES = [
         ('applied', 'Applied'),
         ('shortlisted', 'Shortlisted'),
+        ('first_round_cleared', 'First Round Cleared'),
+        ('second_round_cleared', 'Second Round Cleared'),
+        ('third_round_cleared', 'Third Round Cleared'),
         ('placed', 'Placed'),
         ('rejected', 'Rejected'),
-    ], default='applied')
-    offered_at = models.DateTimeField(auto_now_add=True)
+    ]
+    
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='placement_offers')
+    drive = models.ForeignKey(PlacementDrive, on_delete=models.CASCADE)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='applied')
+    salary_offered = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    rounds_cleared = models.ManyToManyField(PlacementStudentRound, blank=True, related_name='offers')
+    offer_received_at = models.DateTimeField(null=True, blank=True)
+    placed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.student.username} - {self.drive.company_name}"
+    
+    class Meta:
+        unique_together = ['student', 'drive']
 
 
 class PlacementMessage(models.Model):

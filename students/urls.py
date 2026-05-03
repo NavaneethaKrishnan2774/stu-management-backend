@@ -53,4 +53,5 @@ urlpatterns = [
     path('placement/create-drive/', views.create_placement_drive),
     path('placement/send-message/', views.send_placement_message),
     path('placement/drives/', views.placement_drives),
+    path('placement/students-filtered/', views.get_placement_students_filtered),
 ]
