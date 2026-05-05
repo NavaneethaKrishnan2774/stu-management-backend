@@ -1661,10 +1661,13 @@ def get_placement_students_filtered(request):
             cleared=True
         ).values_list('round_number', flat=True).distinct()
         
+        placed_drives = PlacementOffer.objects.filter(student=student, placed=True).select_related('drive')
+        company_names = [offer.drive.company_name for offer in placed_drives]
         student_info = {
             'id': student.id,
             'register_number': student.username,
             'name': f"{student.first_name} {student.last_name}".strip(),
+            'department': student.department,
             'class': f"{student.year} {student.section}",
             'year': student.year,
             'section': student.section,
@@ -1676,6 +1679,7 @@ def get_placement_students_filtered(request):
             'email': student.email,
             'mobile': student.mobile or 'N/A',
             'placed': placed_count > 0,
+            'placed_company': ", ".join(company_names) if company_names else None,
             'total_offers': total_offers,
             'rounds_cleared': list(rounds_cleared),
         }
