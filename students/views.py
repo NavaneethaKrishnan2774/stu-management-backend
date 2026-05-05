@@ -17,6 +17,12 @@ def is_staff_user(user):
     return getattr(user, 'role', None) in ['staff', 'admin'] or getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False)
 
 
+def is_placement_officer(user):
+    return getattr(user, 'role', None) == 'staff' and (
+        getattr(user, 'is_placement_officer', False) or getattr(user, 'designation', None) == 'placement_officer'
+    )
+
+
 # ✅ Attendance
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -1555,7 +1561,7 @@ def delete_feedback_summary(request, form_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def placement_departments(request):
-    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+    if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
     departments = [
@@ -1571,7 +1577,7 @@ def placement_departments(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def placement_students(request, department):
-    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+    if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
     students = User.objects.filter(role='student', department=department).order_by('first_name', 'last_name')
@@ -1626,7 +1632,7 @@ def placement_students(request, department):
 @permission_classes([IsAuthenticated])
 def get_placement_students_filtered(request):
     """Get students filtered by department, year, and placement status"""
-    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+    if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
     department = request.GET.get('department')
@@ -1709,7 +1715,7 @@ def get_placement_students_filtered(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_placement_drive(request):
-    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+    if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
     company_name = request.data.get('company_name')
@@ -1844,7 +1850,7 @@ def _parse_criteria(criterion):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def send_placement_message(request):
-    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+    if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
     subject = request.data.get('subject')
@@ -1875,7 +1881,7 @@ def send_placement_message(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def placement_drives(request):
-    if not (request.user.role == 'staff' and request.user.is_placement_officer):
+    if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
     drives = PlacementDrive.objects.filter(created_by=request.user).order_by('-created_at')
