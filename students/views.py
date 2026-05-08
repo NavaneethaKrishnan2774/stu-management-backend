@@ -1722,123 +1722,248 @@ def create_placement_drive(request):
     if not is_placement_officer(request.user):
         return Response({"error": "Permission denied"}, status=403)
     
+    import json
+
+    def _parse_json_list(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else [parsed]
+            except Exception:
+                return [item.strip() for item in value.split(',') if item.strip()]
+        return [value]
+
+    def _get_list_field(name):
+        if hasattr(request.data, 'getlist'):
+            values = request.data.getlist(name)
+            if values:
+                return values
+        return _parse_json_list(request.data.get(name))
+
     company_name = request.data.get('company_name')
+    company_history = request.data.get('company_history')
+    company_location = request.data.get('company_location')
+    expected_skills = _get_list_field('expected_skills')
+    job_role = request.data.get('job_role')
+    package = request.data.get('package')
+    vacancies = request.data.get('vacancies')
+    location = request.data.get('location')
     drive_date = request.data.get('drive_date')
-    department = request.data.get('department')
-    criteria = request.data.get('criteria')
-    document = request.FILES.get('document')
+    last_date_to_apply = request.data.get('last_date_to_apply')
+    eligible_batches = _get_list_field('eligible_batches')
+    eligible_departments = _get_list_field('eligible_departments')
+    contact_person_name = request.data.get('contact_person_name')
+    contact_person_designation = request.data.get('contact_person_designation')
+    contact_person_email = request.data.get('contact_person_email')
+    contact_person_phone = request.data.get('contact_person_phone')
+    bond_period = request.data.get('bond_period')
+    bond_amount = request.data.get('bond_amount')
+    min_cgpa = request.data.get('min_cgpa')
+    min_10th_percentage = request.data.get('min_10th_percentage')
+    min_12th_percentage = request.data.get('min_12th_percentage')
+    arrears_allowed = request.data.get('arrears_allowed')
+    shortlist_limit = request.data.get('shortlist_limit')
+    perks = _get_list_field('perks')
+    additional_questions = _get_list_field('additional_questions')
+    notification_preference = request.data.get('notification_preference')
+    rounds = _get_list_field('rounds')
+    jd_file = request.FILES.get('jd_file')
+    company_document = request.FILES.get('company_document')
     
-    if not all([company_name, drive_date, department]):
-        return Response({"error": "Missing required fields"}, status=400)
+    if not all([company_name, job_role, drive_date]):
+        return Response({"error": "Missing required fields: company_name, job_role, drive_date"}, status=400)
+
+    if not eligible_departments:
+        return Response({"error": "Please select at least one eligible department."}, status=400)
+    
+    drive_department = eligible_departments[0]
+    
+    try:
+        criteria = json.dumps({
+            'job_role': job_role,
+            'package': package,
+            'vacancies': vacancies,
+            'location': location,
+            'last_date_to_apply': last_date_to_apply,
+            'company_history': company_history,
+            'company_location': company_location,
+            'expected_skills': expected_skills,
+            'min_cgpa': float(min_cgpa) if min_cgpa not in (None, "", "null") else None,
+            'min_10th_percentage': float(min_10th_percentage) if min_10th_percentage not in (None, "", "null") else None,
+            'min_12th_percentage': float(min_12th_percentage) if min_12th_percentage not in (None, "", "null") else None,
+            'arrears_allowed': arrears_allowed,
+            'shortlist_limit': int(shortlist_limit) if shortlist_limit not in (None, "", "") else None,
+            'eligible_departments': eligible_departments,
+            'eligible_batches': eligible_batches,
+            'notification_preference': notification_preference,
+            'contact_person': {
+                'name': contact_person_name,
+                'designation': contact_person_designation,
+                'email': contact_person_email,
+                'phone': contact_person_phone,
+            },
+            'bond': {
+                'period': bond_period,
+                'amount': bond_amount,
+            },
+            'perks': perks,
+            'rounds': rounds,
+        })
+    except Exception:
+        criteria = ""
     
     drive = PlacementDrive.objects.create(
         company_name=company_name,
         drive_date=drive_date,
-        department=department,
+        department=drive_department,
         criteria=criteria,
-        document=document,
+        document=jd_file,
         created_by=request.user,
     )
     
-    # Auto-select eligible students
     eligible_students = _get_eligible_students(drive)
+    eligible_students_list = []
     for student in eligible_students:
-        PlacementOffer.objects.create(
+        eligible_students_list.append({
+            'id': student.id,
+            'username': student.username,
+            'full_name': student.get_full_name() or student.username,
+            'email': student.email,
+            'department': student.department,
+            'year': student.year,
+            'cgpa': float(student.cgpa) if student.cgpa is not None else None,
+            'current_arrears': student.current_arrears,
+        })
+    
+    return Response({
+        "message": f"Drive created successfully. {len(eligible_students_list)} students are eligible.",
+        "drive_id": drive.id,
+        "eligible_students": eligible_students_list
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_drive_to_students(request):
+    if not is_placement_officer(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    drive_id = request.data.get('drive_id')
+    student_ids = request.data.get('student_ids', [])
+    
+    if not drive_id:
+        return Response({"error": "Drive ID required"}, status=400)
+    
+    if not student_ids:
+        return Response({"error": "Student IDs required"}, status=400)
+    
+    try:
+        drive = PlacementDrive.objects.get(id=drive_id, created_by=request.user)
+    except PlacementDrive.DoesNotExist:
+        return Response({"error": "Drive not found"}, status=404)
+    
+    # Get the specified students
+    eligible_students = User.objects.filter(id__in=student_ids, role='student')
+    
+    if not eligible_students.exists():
+        return Response({"error": "No valid students found"}, status=400)
+    
+    # Create placement offers for eligible students
+    for student in eligible_students:
+        PlacementOffer.objects.get_or_create(
             student=student,
             drive=drive,
-            status='applied'
+            defaults={'status': 'applied'}
         )
     
     # Send drive details to eligible students
-    if eligible_students:
-        message_text = f"New placement drive: {company_name} on {drive_date}. Please check your dashboard for details."
-        placement_message = PlacementMessage.objects.create(
-            sender=request.user,
-            subject=f"Placement Drive: {company_name}",
-            message=message_text,
-            drive=drive,
-        )
-        placement_message.recipients.set(eligible_students)
+    message_text = f"New placement drive: {drive.company_name} on {drive.drive_date}. Please check your dashboard for details."
+    placement_message = PlacementMessage.objects.create(
+        sender=request.user,
+        subject=f"Placement Drive: {drive.company_name}",
+        message=message_text,
+        drive=drive,
+    )
+    placement_message.recipients.set(eligible_students)
     
     # Create notifications for eligible students
-    if eligible_students:
-        notification_title = f"New Placement Drive: {company_name}"
-        notification_message = f"A new placement drive for {company_name} has been scheduled on {drive_date}. Check the Development module for details and eligibility criteria."
-        
-        for student in eligible_students:
-            Notification.objects.create(
-                title=notification_title,
-                message=notification_message,
-                department=department,
-                created_by=request.user,
-                student=student,
-            )
+    notification_title = f"New Placement Drive: {drive.company_name}"
+    notification_message = f"A new placement drive for {drive.company_name} has been scheduled on {drive.drive_date}. Check the Development module for details and eligibility criteria."
+    
+    for student in eligible_students:
+        Notification.objects.create(
+            title=notification_title,
+            message=notification_message,
+            department=getattr(drive, 'department', student.department),  # Use drive department or student's department
+            created_by=request.user,
+            student=student,
+        )
     
     # Create notification for HOD of the department
     try:
-        hod_user = User.objects.filter(
-            role__in=['hod', 'staff'],
-            department=department,
-            designation__in=['hod', 'HOD']
-        ).first()
+        # Get departments from the drive or from students
+        departments = set()
+        if hasattr(drive, 'eligible_departments') and drive.eligible_departments:
+            departments.update(drive.eligible_departments)
+        else:
+            departments.update(eligible_students.values_list('department', flat=True))
         
-        if hod_user:
-            hod_notification_title = f"New Placement Drive Created: {company_name}"
-            hod_notification_message = f"A new placement drive for {company_name} has been created for {department} department. {len(eligible_students)} students are eligible. Please review in your dashboard."
+        for dept in departments:
+            hod_user = User.objects.filter(
+                role__in=['hod', 'staff'],
+                department=dept,
+                designation__in=['hod', 'HOD']
+            ).first()
             
-            Notification.objects.create(
-                title=hod_notification_title,
-                message=hod_notification_message,
-                department=department,
-                created_by=request.user,
-                student=hod_user,
-            )
+            if hod_user:
+                hod_notification_title = f"Placement Drive Sent: {drive.company_name}"
+                hod_notification_message = f"The placement drive for {drive.company_name} has been sent to {eligible_students.count()} eligible students in {dept} department."
+                
+                Notification.objects.create(
+                    title=hod_notification_title,
+                    message=hod_notification_message,
+                    department=dept,
+                    created_by=request.user,
+                    student=hod_user,
+                )
     except Exception as e:
-        # Log error but don't fail the drive creation
         print(f"Error creating HOD notification: {e}")
     
-    return Response({"message": f"Drive created and sent to {eligible_students.count()} eligible students", "drive_id": drive.id})
+    return Response({"message": f"Drive sent to {eligible_students.count()} students"})
 
 
 def _get_eligible_students(drive):
     """Filter students based on company criteria"""
-    students = User.objects.filter(role='student', department=drive.department)
-    
-    # Parse criteria (assuming JSON format like {"cgpa": ">=8.0", "arrears": "<=2"})
+    import json
+
+    students = User.objects.filter(role='student')
     try:
-        import json
         criteria = json.loads(drive.criteria) if drive.criteria else {}
-    except:
+    except Exception:
         criteria = {}
-    
-    if 'cgpa' in criteria:
-        op, value = _parse_criteria(criteria['cgpa'])
-        cgpa_value = float(value)
-        if op == '>=':
-            students = students.filter(cgpa__gte=cgpa_value)
-        elif op == '>':
-            students = students.filter(cgpa__gt=cgpa_value)
-        elif op == '<=':
-            students = students.filter(cgpa__lte=cgpa_value)
-        elif op == '<':
-            students = students.filter(cgpa__lt=cgpa_value)
-        elif op == '==':
-            students = students.filter(cgpa=cgpa_value)
-    
-    if 'arrears' in criteria:
-        op, value = _parse_criteria(criteria['arrears'])
-        arrears_value = int(value)
-        if op == '>=':
-            students = students.filter(current_arrears__gte=arrears_value)
-        elif op == '>':
-            students = students.filter(current_arrears__gt=arrears_value)
-        elif op == '<=':
-            students = students.filter(current_arrears__lte=arrears_value)
-        elif op == '<':
-            students = students.filter(current_arrears__lt=arrears_value)
-        elif op == '==':
-            students = students.filter(current_arrears=arrears_value)
-    
+
+    eligible_departments = criteria.get('eligible_departments', [])
+    if eligible_departments:
+        students = students.filter(department__in=eligible_departments)
+    elif getattr(drive, 'department', None):
+        students = students.filter(department=drive.department)
+
+    if 'min_cgpa' in criteria and criteria['min_cgpa'] is not None:
+        try:
+            students = students.filter(cgpa__gte=float(criteria['min_cgpa']))
+        except Exception:
+            pass
+
+    arrears_allowed = criteria.get('arrears_allowed')
+    if arrears_allowed == 'Not Allowed':
+        students = students.filter(current_arrears=0)
+    elif arrears_allowed == 'Allowed (up to 2)':
+        students = students.filter(current_arrears__lte=2)
+
     return students
 
 
@@ -1960,11 +2085,42 @@ def student_placement_drives(request):
     if request.user.role != 'student':
         return Response({"error": "Permission denied"}, status=403)
 
-    department = request.user.department
-    drives = PlacementDrive.objects.filter(department=department).order_by('-drive_date')
+    import json
+
+    student_department = request.user.department
+    student_cgpa = float(request.user.cgpa) if request.user.cgpa is not None else None
+    student_arrears = getattr(request.user, 'current_arrears', None)
+
+    drives = PlacementDrive.objects.order_by('-drive_date')
 
     data = []
     for drive in drives:
+        try:
+            criteria = json.loads(drive.criteria) if drive.criteria else {}
+        except Exception:
+            criteria = {}
+
+        eligible_departments = criteria.get('eligible_departments', [])
+        if eligible_departments:
+            if student_department not in eligible_departments:
+                continue
+        elif drive.department and student_department != drive.department:
+            continue
+
+        min_cgpa = criteria.get('min_cgpa')
+        if min_cgpa is not None:
+            try:
+                if student_cgpa is None or student_cgpa < float(min_cgpa):
+                    continue
+            except Exception:
+                pass
+
+        arrears_allowed = criteria.get('arrears_allowed')
+        if arrears_allowed == 'Not Allowed' and student_arrears is not None and student_arrears > 0:
+            continue
+        if arrears_allowed == 'Allowed (up to 2)' and student_arrears is not None and student_arrears > 2:
+            continue
+
         # Get all placement offers for this drive
         offers = PlacementOffer.objects.filter(drive=drive).select_related('student')
         
@@ -1983,7 +2139,7 @@ def student_placement_drives(request):
                 attendees.append({
                     'id': offer.student.id,
                     'name': offer.student.get_full_name() or offer.student.username,
-                    'register_number': offer.student.register_number,
+                    'register_number': getattr(offer.student, 'register_number', None) or offer.student.username,
                     'status': offer.status,
                 })
                 
