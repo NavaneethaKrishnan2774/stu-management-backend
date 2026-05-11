@@ -29,6 +29,7 @@ urlpatterns = [
     path('submit-complaint/', views.submit_complaint),
     path('available-faculties/', views.get_available_faculties),
     path('attendance-percentage/', views.get_attendance_percentage),
+    path('profile/', views.get_profile),
     path('check-attendance/', views.check_low_attendance),
     path('hod/overview/', views.hod_overview),
     path('hod/students/', views.hod_students),

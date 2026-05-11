@@ -42,6 +42,12 @@ class StaffRegistrationView(APIView):
         if User.objects.filter(username=data.get('id_number')).exists():
             return Response({"error": "ID Number already exists"}, status=status.HTTP_400_BAD_REQUEST)
 
+        if data.get('username'):
+            if User.objects.filter(username=data.get('username')).exists():
+                return Response({"error": "Username already registered"}, status=status.HTTP_400_BAD_REQUEST)
+            if StaffRegistration.objects.filter(username=data.get('username')).exists():
+                return Response({"error": "Registration already pending for this username"}, status=status.HTTP_400_BAD_REQUEST)
+
         if StaffRegistration.objects.filter(email=data.get('email')).exists():
             return Response({"error": "Registration already pending for this email"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -51,22 +57,47 @@ class StaffRegistrationView(APIView):
         try:
             registration = StaffRegistration.objects.create(
                 name=data['name'],
+                username=data.get('username') or data['id_number'],
                 dob=data['dob'],
                 age=data['age'],
-                department=data['department'],
+                gender=data.get('gender'),
+                department=data.get('department'),
                 designation=data['designation'],
                 mobile=data.get('mobile'),
+                emergency_contact=data.get('emergency_contact'),
                 id_number=data['id_number'],
                 joining_year=data['joining_year'],
-                photo_filename=data.get('photo_filename'),
                 address=data.get('address'),
                 blood_group=data.get('blood_group'),
+                department_managed=data.get('department_managed'),
                 subjects=data.get('subjects'),
+                subjects_handled=data.get('subjects_handled'),
+                semester_handling=data.get('semester_handling'),
+                class_incharge_details=data.get('class_incharge_details'),
                 experience=data.get('experience'),
                 room_number=data.get('room_number'),
                 qualification=data.get('qualification'),
+                hostel_name=data.get('hostel_name'),
+                block_assigned=data.get('block_assigned'),
+                floor_assigned=data.get('floor_assigned'),
+                hostel_type=data.get('hostel_type'),
+                duty_timing=data.get('duty_timing'),
+                official_whatsapp=data.get('official_whatsapp'),
+                industry_experience=data.get('industry_experience'),
+                companies_coordinated=data.get('companies_coordinated'),
+                library_id=data.get('library_id'),
+                section_managed=data.get('section_managed'),
+                shift_timing=data.get('shift_timing'),
+                association_name=data.get('association_name'),
+                certifications=data.get('certifications'),
+                account_approval_status=data.get('account_approval_status', 'pending'),
                 email=data['email'],
                 password=data['password'],  # Will be hashed when creating user
+                profile_photo=request.FILES.get('profile_photo'),
+                id_card=request.FILES.get('id_card'),
+                qualification_certificates=request.FILES.get('qualification_certificates'),
+                resume=request.FILES.get('resume'),
+                appointment_order=request.FILES.get('appointment_order'),
             )
 
             return Response({
@@ -120,7 +151,7 @@ class AdminApproveStaffRegistrationView(APIView):
         if action == 'approve':
             # Create the user account using create_user to properly hash password
             user = User.objects.create_user(
-                username=registration.id_number,
+                username=registration.username or registration.id_number,
                 email=registration.email,
                 password=registration.password,  # create_user hashes this automatically
                 first_name=registration.name.split()[0] if registration.name else '',
@@ -132,7 +163,7 @@ class AdminApproveStaffRegistrationView(APIView):
                 is_active=True,
             )
 
-            # Set additional fields based on selected designation
+            # Set HOD as a dedicated role, other staff stay as staff with role-specific flags
             if registration.designation == 'hod':
                 user.role = 'hod'
             elif registration.designation == 'faculty_fa':

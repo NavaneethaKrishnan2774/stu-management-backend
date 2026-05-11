@@ -973,6 +973,121 @@ def calculate_attendance_percentage(user):
     return (present / total) * 100
 
 
+# ✅ PROFILE API
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def get_profile(request):
+    user = request.user
+    
+    if request.method == 'PUT':
+        # Handle profile update
+        data = request.data
+        
+        # Update basic user fields
+        if 'first_name' in data:
+            user.first_name = data['first_name']
+        if 'last_name' in data:
+            user.last_name = data['last_name']
+        if 'email' in data:
+            user.email = data['email']
+        
+        # Update student-specific fields
+        if 'register_number' in data:
+            user.register_number = data['register_number']
+        if 'department' in data:
+            user.department = data['department']
+        if 'year' in data:
+            user.year = data['year']
+        if 'section' in data:
+            user.section = data['section']
+        if 'semester' in data:
+            user.semester = data['semester']
+        if 'mobile' in data:
+            user.mobile = data['mobile']
+        if 'date_of_birth' in data:
+            user.date_of_birth = data['date_of_birth']
+        if 'age' in data:
+            user.age = data['age']
+        if 'parent_mobile' in data:
+            user.parent_mobile = data['parent_mobile']
+        if 'year_of_joining' in data:
+            user.year_of_joining = data['year_of_joining']
+        if 'blood_group' in data:
+            user.blood_group = data['blood_group']
+        if 'advisor_faculty_id' in data:
+            user.advisor_faculty_id = data['advisor_faculty_id']
+        if 'emergency_contact' in data:
+            user.emergency_contact = data['emergency_contact']
+        if 'residential_address' in data:
+            user.residential_address = data['residential_address']
+        
+        # Handle profile photo upload
+        if 'profile_photo' in request.FILES:
+            user.profile_photo = request.FILES['profile_photo']
+        
+        user.save()
+        
+        # Return updated profile record so frontend can refresh immediately
+        profile_data = {
+            "id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "register_number": getattr(user, 'register_number', None),
+            "department": getattr(user, 'department', None),
+            "year": getattr(user, 'year', None),
+            "section": getattr(user, 'section', None),
+            "semester": getattr(user, 'semester', None),
+            "phone": getattr(user, 'mobile', None),
+            "date_of_birth": getattr(user, 'date_of_birth', None),
+            "age": getattr(user, 'age', None),
+            "parent_mobile": getattr(user, 'parent_mobile', None),
+            "year_of_joining": getattr(user, 'year_of_joining', None),
+            "blood_group": getattr(user, 'blood_group', None),
+            "advisor_faculty_id": getattr(user, 'advisor_faculty_id', None),
+            "emergency_contact": getattr(user, 'emergency_contact', None),
+            "residential_address": getattr(user, 'residential_address', None),
+            "profile_photo": user.profile_photo.url if user.profile_photo else None,
+            "current_semester": getattr(user, 'current_semester', None),
+            "cgpa": getattr(user, 'cgpa', None),
+            "placed": getattr(user, 'placed', False),
+            "is_active": user.is_active,
+            "attendance_percentage": round(calculate_attendance_percentage(user), 2),
+        }
+        return Response(profile_data)
+    
+    # GET request - return profile data
+    profile_data = {
+        "id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email,
+        "register_number": getattr(user, 'register_number', None),
+        "department": getattr(user, 'department', None),
+        "year": getattr(user, 'year', None),
+        "section": getattr(user, 'section', None),
+        "semester": getattr(user, 'semester', None),
+        "phone": getattr(user, 'mobile', None),
+        "date_of_birth": getattr(user, 'date_of_birth', None),
+        "age": getattr(user, 'age', None),
+        "parent_mobile": getattr(user, 'parent_mobile', None),
+        "year_of_joining": getattr(user, 'year_of_joining', None),
+        "blood_group": getattr(user, 'blood_group', None),
+        "advisor_faculty_id": getattr(user, 'advisor_faculty_id', None),
+        "emergency_contact": getattr(user, 'emergency_contact', None),
+        "residential_address": getattr(user, 'residential_address', None),
+        "profile_photo": user.profile_photo.url if user.profile_photo else None,
+        "current_semester": getattr(user, 'current_semester', None),
+        "cgpa": getattr(user, 'cgpa', None),
+        "placed": getattr(user, 'placed', False),
+        "is_active": user.is_active,
+        "attendance_percentage": round(calculate_attendance_percentage(user), 2),
+    }
+    return Response(profile_data)
+
+
 # ✅ ATTENDANCE API
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -1582,11 +1697,12 @@ def placement_students(request, department):
     
     students = User.objects.filter(role='student', department=department).order_by('first_name', 'last_name')
     
-    # Get attendance percentages
+    # Get attendance percentages, placement status and completed assessment markers
     student_data = []
     for student in students:
         attendance_percentage = _attendance_percentage_for_student(student)
         placed_offers = PlacementOffer.objects.filter(student=student, status='placed').count()
+        assessment_completed = Submission.objects.filter(student=student, marks__isnull=False).exists()
         
         student_data.append({
             'id': student.id,
@@ -1604,19 +1720,19 @@ def placement_students(request, department):
             'mobile': student.mobile,
             'attendance_percentage': attendance_percentage,
             'placed': placed_offers > 0,
+            'assessment_completed': assessment_completed,
         })
     
-    # Sort: placed students first, then by attendance desc if any placed, else alphabetical
-    placed_students = [s for s in student_data if s['placed']]
-    unplaced_students = [s for s in student_data if not s['placed']]
+    # Keep only students who have completed an assessment submission
+    completed_students = [s for s in student_data if s['assessment_completed']]
+    
+    placed_students = [s for s in completed_students if s['placed']]
+    unplaced_students = [s for s in completed_students if not s['placed']]
     
     if placed_students:
-        # Sort placed by name
         placed_students.sort(key=lambda x: x['name'])
-        # Sort unplaced by attendance desc, then name
         unplaced_students.sort(key=lambda x: (-(x['attendance_percentage'] or 0), x['name']))
     else:
-        # No placed students, sort all by name
         unplaced_students.sort(key=lambda x: x['name'])
     
     result = placed_students + unplaced_students

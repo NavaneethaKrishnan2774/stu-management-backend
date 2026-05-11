@@ -137,12 +137,30 @@ class User(AbstractUser):
     department = models.CharField(max_length=15, choices=DEPARTMENT_CHOICES, blank=True, null=True)
     year = models.CharField(max_length=10, choices=YEAR_CHOICES, blank=True, null=True)
     section = models.CharField(max_length=1, choices=SECTION_CHOICES, blank=True, null=True)
+    semester = models.CharField(max_length=1, choices=[
+        ('1', '1'), ('2', '2'), ('3', '3'), ('4', '4'), ('5', '5'), ('6', '6'), ('7', '7'), ('8', '8')
+    ], blank=True, null=True)
     cgpa = models.DecimalField(max_digits=4, decimal_places=2, blank=True, null=True)
     current_arrears = models.PositiveIntegerField(default=0)
     arrears_history = models.TextField(blank=True, null=True)  # JSON or text description
     resume = models.FileField(upload_to='resumes/', blank=True, null=True)
     job_offers_count = models.PositiveIntegerField(default=0)
     mobile = models.CharField(max_length=15, blank=True, null=True)
+    
+    # Additional student profile fields
+    date_of_birth = models.DateField(blank=True, null=True)
+    age = models.PositiveIntegerField(blank=True, null=True)  # Auto-calculated from DOB
+    parent_mobile = models.CharField(max_length=15, blank=True, null=True)
+    register_number = models.CharField(max_length=20, unique=True, blank=True, null=True)
+    year_of_joining = models.CharField(max_length=4, blank=True, null=True)
+    profile_photo = models.ImageField(upload_to='profile_photos/', blank=True, null=True)
+    residential_address = models.TextField(blank=True, null=True)
+    blood_group = models.CharField(max_length=5, choices=[
+        ('A+', 'A+'), ('A-', 'A-'), ('B+', 'B+'), ('B-', 'B-'), 
+        ('AB+', 'AB+'), ('AB-', 'AB-'), ('O+', 'O+'), ('O-', 'O-')
+    ], blank=True, null=True)
+    advisor_faculty_id = models.CharField(max_length=20, blank=True, null=True)
+    emergency_contact = models.CharField(max_length=15, blank=True, null=True)
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -170,11 +188,37 @@ class StaffRegistration(models.Model):
     id_number = models.CharField(max_length=20, unique=True)
     joining_year = models.CharField(max_length=4)
     subjects = models.TextField(blank=True, null=True)
+    subjects_handled = models.TextField(blank=True, null=True)
+    semester_handling = models.CharField(max_length=100, blank=True, null=True)
+    class_incharge_details = models.CharField(max_length=255, blank=True, null=True)
     experience = models.CharField(max_length=50, blank=True, null=True)
     room_number = models.CharField(max_length=20, blank=True, null=True)
     qualification = models.CharField(max_length=100, blank=True, null=True)
+    department_managed = models.CharField(max_length=100, blank=True, null=True)
+    hostel_name = models.CharField(max_length=100, blank=True, null=True)
+    block_assigned = models.CharField(max_length=100, blank=True, null=True)
+    floor_assigned = models.CharField(max_length=100, blank=True, null=True)
+    hostel_type = models.CharField(max_length=50, blank=True, null=True)
+    duty_timing = models.CharField(max_length=100, blank=True, null=True)
+    official_whatsapp = models.CharField(max_length=50, blank=True, null=True)
+    industry_experience = models.CharField(max_length=100, blank=True, null=True)
+    companies_coordinated = models.TextField(blank=True, null=True)
+    library_id = models.CharField(max_length=50, blank=True, null=True)
+    section_managed = models.CharField(max_length=100, blank=True, null=True)
+    shift_timing = models.CharField(max_length=100, blank=True, null=True)
+    association_name = models.CharField(max_length=100, blank=True, null=True)
+    certifications = models.TextField(blank=True, null=True)
+    account_approval_status = models.CharField(max_length=50, blank=True, null=True)
+    username = models.CharField(max_length=100, blank=True, null=True)
+    gender = models.CharField(max_length=20, blank=True, null=True)
+    emergency_contact = models.CharField(max_length=15, blank=True, null=True)
 
     # File uploads
+    profile_photo = models.FileField(upload_to='staff_registration/profile_photos/', blank=True, null=True)
+    id_card = models.FileField(upload_to='staff_registration/id_cards/', blank=True, null=True)
+    qualification_certificates = models.FileField(upload_to='staff_registration/qualification_certificates/', blank=True, null=True)
+    resume = models.FileField(upload_to='staff_registration/resumes/', blank=True, null=True)
+    appointment_order = models.FileField(upload_to='staff_registration/appointment_orders/', blank=True, null=True)
     photo_filename = models.CharField(max_length=255, blank=True, null=True)
 
     # Status
