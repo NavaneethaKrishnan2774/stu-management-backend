@@ -31,6 +31,12 @@ class LoginSerializer(serializers.Serializer):
                         user = User.objects.get(email=username)
                     except User.DoesNotExist:
                         pass
+                # Try mobile number
+                if not user:
+                    try:
+                        user = User.objects.get(mobile=username)
+                    except User.DoesNotExist:
+                        pass
 
         if not user:
             raise serializers.ValidationError("Invalid credentials")

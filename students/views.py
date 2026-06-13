@@ -725,14 +725,23 @@ def hod_approve_timetable(request, id):
     item.approval_status = 'approved'
     item.approved_by = request.user
     item.approved_at = now()
+    item.hod_comment = request.data.get('hod_comment', item.hod_comment)
     item.save()
 
+    # Prepare notification title and message
+    faculty_title = "Your timetable has been approved by the HOD"
+    faculty_message = _format_hod_timetable_message(item, 'approved', item.hod_comment)
+    
+    # Send notification to faculty
     if item.faculty_user:
-        title = "Timetable Approved"
-        message = _format_hod_timetable_message(item, 'approved')
-        _create_notification_for_user(item.faculty_user, title, message, item.department, item.year, item.section, request.user)
+        _create_notification_for_user(item.faculty_user, faculty_title, faculty_message, item.department, item.year, item.section, request.user)
+    
+    # Send notifications to class students
+    student_title = "A new approved timetable has been published"
+    student_message = faculty_message
+    _create_notification_for_class_students(student_title, student_message, item.department, item.year, item.section, request.user)
 
-    return Response({"message": "Timetable approved"})
+    return Response({"message": "Timetable approved", "approval_status": "approved"})
 
 
 @api_view(['POST'])
@@ -896,23 +905,84 @@ def hod_update_timetable(request, id):
     notification_recipients = list({user.id: user for user in notification_recipients}.values())
     comment_text = item.hod_comment or None
 
+    # Handle notifications based on approval status
     if item.approval_status == 'approved':
-        title = "Timetable Approved"
-        message = _format_hod_timetable_message(item, 'approved', comment_text)
+        faculty_title = "Your timetable has been approved by the HOD"
+        faculty_message = _format_hod_timetable_message(item, 'approved', comment_text)
+        
+        # Notify faculty
+        for recipient in notification_recipients:
+            _create_notification_for_user(recipient, faculty_title, faculty_message, item.department, item.year, item.section, request.user)
+        
+        # Notify class students
+        student_title = "A new approved timetable has been published"
+        student_message = faculty_message
+        _create_notification_for_class_students(student_title, student_message, item.department, item.year, item.section, request.user)
+        
     elif item.approval_status == 'rejected':
-        title = "Timetable Rejected"
+        title = "Your timetable has been rejected"
         message = _format_hod_timetable_message(item, 'rejected', comment_text)
+        # Notify ONLY faculty - NOT students
+        for recipient in notification_recipients:
+            _create_notification_for_user(recipient, title, message, item.department, item.year, item.section, request.user)
+        
     elif item.approval_status == 'rework_assigned':
-        title = "Timetable Rework Requested"
+        title = "Your timetable requires modifications"
         message = _format_hod_timetable_message(item, 'sent back for rework', comment_text)
+        # Notify ONLY faculty - NOT students
+        for recipient in notification_recipients:
+            _create_notification_for_user(recipient, title, message, item.department, item.year, item.section, request.user)
     else:
         title = "Timetable Updated"
         message = _format_hod_timetable_message(item, 'updated', comment_text)
+        # Notify faculty only for other updates
+        for recipient in notification_recipients:
+            _create_notification_for_user(recipient, title, message, item.department, item.year, item.section, request.user)
 
-    for recipient in notification_recipients:
-        _create_notification_for_user(recipient, title, message, item.department, item.year, item.section, request.user)
+    return Response({"message": "Timetable updated", "approval_status": item.approval_status})
 
-    return Response({"message": "Timetable updated"})
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def staff_my_timetables(request):
+    """Get timetables created by or assigned to a staff member"""
+    if not is_staff_user(request.user):
+        return Response({"error": "Permission denied"}, status=403)
+    
+    # Get timetables created by staff
+    created_entries = Timetable.objects.filter(created_by=request.user)
+    
+    # Get timetables assigned to staff as faculty
+    assigned_entries = Timetable.objects.filter(faculty_user=request.user)
+    
+    # Combine and deduplicate
+    entries = (created_entries | assigned_entries).distinct()
+    
+    data = []
+    for item in entries:
+        data.append({
+            "id": item.id,
+            "department": item.department,
+            "year": item.year,
+            "section": item.section,
+            "semester": item.semester,
+            "subject_code": item.subject_code,
+            "subject": item.subject,
+            "faculty": item.faculty,
+            "faculty_id": item.faculty_user.id if item.faculty_user else None,
+            "created_by": item.created_by.username if item.created_by else None,
+            "approved_by": item.approved_by.username if item.approved_by else None,
+            "approved_at": item.approved_at,
+            "is_approved": item.is_approved,
+            "approval_status": item.approval_status,
+            "hod_comment": item.hod_comment,
+            "day": item.day,
+            "time": item.time,
+            "period": item.period,
+            "credits": item.credits,
+        })
+    
+    return Response(data)
 
 
 # ✅ COUNT
@@ -1148,6 +1218,10 @@ def _attendance_percentage_for_staff(staff_member):
 
 
 def _is_hod_user(user):
+    # Allow superusers and admin users to access HOD endpoints
+    if user.is_superuser or str(getattr(user, 'role', '') or '').strip().lower() == 'admin':
+        return True
+    
     role = str(getattr(user, 'role', '') or '').strip().lower()
     designation = str(getattr(user, 'designation', '') or '').strip().lower()
     return role == 'hod' or designation == 'hod' or (role == 'staff' and designation == 'hod')
@@ -1219,6 +1293,34 @@ def _format_hod_timetable_message(item, action, comment=None):
         f"Timetable entry for {class_desc} ({item.semester} sem, {item.day} {item.time}) - "
         f"{subject_desc} has been {action}.{comment_text}"
     )
+
+
+def _create_notification_for_class_students(title, message, department, year, section, created_by):
+    """Send notifications to all students in a specific class"""
+    if not department or not year or not section:
+        return 0
+    
+    students = User.objects.filter(
+        role='student',
+        department=department,
+        year=year,
+        section=section
+    )
+    
+    count = 0
+    for student in students:
+        Notification.objects.create(
+            title=title,
+            message=message,
+            department=department,
+            year=year,
+            section=section,
+            created_by=created_by,
+            student=student,
+        )
+        count += 1
+    
+    return count
 
 
 def _create_notification_for_user(user, title, message, department, year, section, created_by):

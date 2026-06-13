@@ -9,6 +9,7 @@ from .serializers import LoginSerializer
 from .models import StaffRegistration, User
 from django.utils import timezone
 
+
 class LoginView(APIView):
 
     def post(self, request):
@@ -29,6 +30,68 @@ class LoginView(APIView):
             })
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class StudentRegistrationView(APIView):
+    def post(self, request):
+        data = request.data
+        register_number = (data.get('register_number') or '').strip()
+        email = (data.get('email') or '').strip()
+        password = data.get('password')
+        name = (data.get('name') or '').strip()
+
+        if not name or not register_number or not email or not password:
+            return Response(
+                {"error": "Name, register number, email, and password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(username=register_number).exists() or User.objects.filter(register_number=register_number).exists():
+            return Response({"error": "Register number already registered."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if User.objects.filter(email=email).exists():
+            return Response({"error": "Email already registered."}, status=status.HTTP_400_BAD_REQUEST)
+
+        name_parts = name.split()
+        first_name = name_parts[0] if name_parts else ''
+        last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+
+        try:
+            user = User.objects.create_user(
+                username=register_number,
+                email=email,
+                password=password,
+                first_name=first_name,
+                last_name=last_name,
+                role='student',
+                department=data.get('department'),
+                section=data.get('section'),
+                semester=data.get('semester'),
+                mobile=data.get('mobile'),
+                register_number=register_number,
+                year_of_joining=data.get('joining_year'),
+                parent_mobile=data.get('parentMobile') or data.get('parent_mobile'),
+                residential_address=data.get('address'),
+                blood_group=data.get('blood_group'),
+                advisor_faculty_id=data.get('advisor_faculty_id'),
+                emergency_contact=data.get('emergency_contact'),
+                is_active=True,
+            )
+
+            if data.get('dob'):
+                user.date_of_birth = data.get('dob')
+            if data.get('age'):
+                user.age = data.get('age')
+
+            user.save()
+
+            return Response({
+                "success": True,
+                "message": "Student registration successful.",
+                "id": user.id,
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class StaffRegistrationView(APIView):

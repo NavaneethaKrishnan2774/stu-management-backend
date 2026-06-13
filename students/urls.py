@@ -46,6 +46,7 @@ urlpatterns = [
     path('hod/timetables/', views.hod_timetables),
     path('hod/approve-timetable/<int:id>/', views.hod_approve_timetable),
     path('hod/update-timetable/<int:id>/', views.hod_update_timetable),
+    path('staff/my-timetables/', views.staff_my_timetables),
     path('hod/placement-drives/', views.hod_placement_drives),
     path('student/placement-drives/', views.student_placement_drives),
     # Placement URLs
